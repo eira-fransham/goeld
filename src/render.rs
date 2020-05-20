@@ -60,12 +60,12 @@ const ATLAS_EXTENT: wgpu::Extent3d = wgpu::Extent3d {
 };
 
 const VERTEX_SHADER: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/basic.vert.spv"
+    env!("OUT_DIR"),
+    "/basic.vert.spv"
 ));
 const FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/basic.frag.spv"
+    env!("OUT_DIR"),
+    "/basic.frag.spv"
 ));
 
 #[derive(Debug, Copy, Clone)]

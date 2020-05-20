@@ -1,0 +1,23 @@
+[package]
+name = "unforseen-consequences-rust"
+version = "0.1.0"
+authors = ["Jef <jackefransham@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bsp = { path = "./bsp" }
+wgpu = { git = "https://github.com/gfx-rs/wgpu-rs" }
+winit = "0.22"
+futures = "0.3"
+bytemuck = "1"
+cgmath = "0.17"
+itertools = "0.9"
+fnv = "1"
+rect_packer = "0.2"
+image = "0.23"
+memoffset = "0.5"
+
+[workspace]
+members = ["bsp"]

@@ -179,7 +179,42 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 }
 
 fn main() {
+    use goldsrc_mdl::Mdl;
+
     let loader = loader::Loader::new();
+
+    let mut mdl = Mdl::read(
+        loader
+            .models()
+            .load(std::path::PathBuf::from(std::env::args().nth(1).unwrap()).into())
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+
+    let mut bodyparts = mdl.bodyparts();
+
+    while let Some((name, mut models)) = bodyparts.next().unwrap() {
+        dbg!(name);
+
+        while let Some(mut model) = models.next().unwrap() {
+            dbg!(&*model);
+
+            let mut meshes = model.meshes().unwrap();
+
+            while let Some(mut mesh) = meshes.next().unwrap() {
+                dbg!(&*mesh);
+
+                dbg!(mesh
+                    .triverts()
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap());
+            }
+        }
+    }
+
+    panic!();
 
     let bsp = Bsp::read(
         loader

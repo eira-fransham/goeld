@@ -322,8 +322,6 @@ where
         }
     }
 
-    let _ = out.save("atlas.png");
-
     Ok((out, map))
 }
 

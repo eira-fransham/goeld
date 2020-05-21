@@ -5,6 +5,11 @@ use std::path::Path;
 const DATA_FOLDER: &str = "data";
 const TEXTURE_FOLDER: &str = "textures";
 const MAP_FOLDER: &str = "maps";
+const MODEL_FOLDER: &str = "models";
+
+const MAP_EXTENSIONS: &[&str] = &["bsp"];
+const TEXTURE_EXTENSIONS: &[&str] = &["bmp", "png", "tga", "gif", "tiff", "jpg", "jpeg"];
+const MODEL_EXTENSIONS: &[&str] = &["mdl"];
 
 pub struct Loader {
     _noconstruct: (),
@@ -22,9 +27,6 @@ pub struct WithPath<L, const PATH: &'static str> {
 pub struct CaseInsensitive<L> {
     inner: L,
 }
-
-const MAP_EXTENSIONS: &[&str] = &["bsp"];
-const TEXTURE_EXTENSIONS: &[&str] = &["bmp", "png", "tga", "gif", "tiff", "jpg", "jpeg"];
 
 impl<L> Load for WithExtensions<L>
 where
@@ -169,6 +171,15 @@ impl Loader {
                 inner: WithPath::<_, MAP_FOLDER> { inner: self.data() },
             },
             extensions: MAP_EXTENSIONS,
+        }
+    }
+
+    pub fn models(&self) -> impl Load + '_ {
+        WithExtensions {
+            inner: CaseInsensitive {
+                inner: WithPath::<_, MODEL_FOLDER> { inner: self.data() },
+            },
+            extensions: MODEL_EXTENSIONS,
         }
     }
 }

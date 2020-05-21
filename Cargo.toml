@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 bsp = { path = "./bsp" }
+goldsrc-mdl = { path = "./goldsrc-mdl/" }
 wgpu = { git = "https://github.com/gfx-rs/wgpu-rs" }
 winit = "0.22"
 futures = "0.3"
@@ -20,4 +21,4 @@ image = "0.23"
 memoffset = "0.5"
 
 [workspace]
-members = ["bsp"]
+members = ["bsp", "goldsrc-mdl", "goldsrc-format-common"]

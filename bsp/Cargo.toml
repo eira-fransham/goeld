@@ -9,11 +9,11 @@ license = "MIT"
 edition = "2018"
 
 [dependencies]
-arrayvec = "0.4"
-bitflags = "1.0"
+arrayvec = "0.5"
+bitflags = "1"
 bv = "0.11"
-byteorder = "0.5"
 itertools = "0.9"
+goldsrc-format-common = { path = "../goldsrc-format-common/", features = ["nightly"] }
 
 [features]
 bench = []

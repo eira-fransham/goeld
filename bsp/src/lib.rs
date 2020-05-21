@@ -1,16 +1,21 @@
 #![cfg_attr(feature = "bench", feature(test))]
 
+// TODO: Support other similar BSP versions (especially GoldSrc BSP)
+
 #[cfg(feature = "bench")]
 extern crate test;
 
 use arrayvec::ArrayString;
 use bitflags::bitflags;
 use bv::BitVec;
-use byteorder::{LittleEndian, ReadBytesExt};
+pub use goldsrc_format_common::{
+    parseable, CoordSystem, ElementSize, Magic, QVec, SimpleParse, XEastYDownZSouth,
+    XEastYSouthZUp, V3,
+};
 use std::{
     convert::{TryFrom, TryInto},
     fmt,
-    io::{self, ErrorKind, Read, Seek, SeekFrom, Take},
+    io::{self, ErrorKind, Read, Seek, SeekFrom},
     iter::{self, FromIterator},
     ops::Deref,
 };
@@ -25,191 +30,41 @@ fn error(msg: impl ToString) -> io::Error {
     panic!("{}", msg.to_string())
 }
 
-trait ElementSize {
-    const SIZE: usize;
-}
-
-pub trait CoordSystem: Sized {
-    fn into_qvec(vec: V3<Self>) -> QVec;
-    fn from_qvec(vec: QVec) -> V3<Self>;
-}
-
-#[derive(Debug, Default, Copy, Clone)]
-pub struct XEastYSouthZUp;
-#[derive(Debug, Default, Copy, Clone)]
-pub struct XEastYDownZSouth;
-
-impl CoordSystem for XEastYSouthZUp {
-    fn into_qvec(vec: V3<Self>) -> QVec {
-        vec
-    }
-
-    fn from_qvec(vec: QVec) -> V3<Self> {
-        vec
-    }
-}
-
-impl CoordSystem for XEastYDownZSouth {
-    fn into_qvec(vec: V3<Self>) -> QVec {
-        V3::new([vec.x(), -vec.z(), vec.y()])
-    }
-    fn from_qvec(vec: QVec) -> V3<Self> {
-        V3::new([vec.x(), vec.z(), -vec.y()])
+parseable! {
+    #[derive(Debug, Default)]
+    struct Directories {
+        entities: DirEntry,
+        planes: DirEntry,
+        vertices: DirEntry,
+        visdata: DirEntry,
+        nodes: DirEntry,
+        textures: DirEntry,
+        faces: DirEntry,
+        lightmaps: DirEntry,
+        leaves: DirEntry,
+        leaf_faces: DirEntry,
+        leaf_brushes: DirEntry,
+        edges: DirEntry,
+        surf_edges: DirEntry,
+        models: DirEntry,
+        brushes: DirEntry,
+        brush_sides: DirEntry,
+        // Appears to be unused, even in Quake 2 itself
+        pop: DirEntry,
+        areas: DirEntry,
+        area_portals: DirEntry,
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-// So that we can ensure that `size_of` correctly reports the size of this type.
-// `C` should be a ZST but if it isn't then this should still act correctly.
-#[repr(C)]
-pub struct V3<C>(pub [f32; 3], pub C);
-
-impl<C> std::ops::Neg for V3<C> {
-    type Output = Self;
-
-    fn neg(self) -> Self {
-        V3([-self.0[0], -self.0[1], -self.0[2]], self.1)
+parseable! {
+    #[derive(Clone, Debug, Default)]
+    struct DirEntry {
+        offset: u32,
+        length: u32,
     }
 }
 
-impl<C> std::ops::Add<Self> for V3<C> {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        V3(
-            [
-                self.0[0] + other.0[0],
-                self.0[1] + other.0[1],
-                self.0[2] + other.0[2],
-            ],
-            self.1,
-        )
-    }
-}
-
-impl<C> std::ops::Div<f32> for V3<C> {
-    type Output = Self;
-
-    fn div(self, other: f32) -> Self {
-        V3(
-            [self.0[0] / other, self.0[1] / other, self.0[2] / other],
-            self.1,
-        )
-    }
-}
-
-impl<C> std::ops::Mul<f32> for V3<C> {
-    type Output = Self;
-
-    fn mul(self, other: f32) -> Self {
-        V3(
-            [self.0[0] * other, self.0[1] * other, self.0[2] * other],
-            self.1,
-        )
-    }
-}
-
-impl<C> V3<C> {
-    pub fn x(&self) -> f32 {
-        self.0[0]
-    }
-    pub fn y(&self) -> f32 {
-        self.0[1]
-    }
-    pub fn z(&self) -> f32 {
-        self.0[2]
-    }
-}
-
-impl<C> ElementSize for V3<C> {
-    const SIZE: usize = {
-        use std::mem;
-
-        mem::size_of::<f32>() * 3 + mem::size_of::<C>()
-    };
-}
-
-impl<C: Default> V3<C> {
-    pub fn new(xyz: [f32; 3]) -> Self {
-        V3(xyz, Default::default())
-    }
-}
-
-impl<C> V3<C> {
-    pub fn dot(&self, other: &Self) -> f32 {
-        self.0.iter().zip(other.0.iter()).map(|(a, b)| a * b).sum()
-    }
-}
-
-impl<C: Default> From<[f32; 3]> for V3<C> {
-    fn from(xyz: [f32; 3]) -> Self {
-        V3::new(xyz)
-    }
-}
-
-pub type QVec = V3<XEastYSouthZUp>;
-
-macro_rules! elsize {
-    ($(#[$($any:tt)*])* $v:vis struct $name:ident { $($v0:vis $fname:ident : $fty:ty,)* }) => {
-        impl ElementSize for $name {
-            const SIZE: usize = {
-                use std::mem;
-
-                let mut a = 0;
-
-                $(
-                    a += mem::size_of::<$fty>();
-                )*
-
-                a
-            };
-        }
-
-        $(#[$($any)*])* $v struct $name {
-            $($v0 $fname : $fty,)*
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct Directories {
-    entities: DirEntry,
-    planes: DirEntry,
-    vertices: DirEntry,
-    visdata: DirEntry,
-    nodes: DirEntry,
-    textures: DirEntry,
-    faces: DirEntry,
-    lightmaps: DirEntry,
-    leaves: DirEntry,
-    leaf_faces: DirEntry,
-    leaf_brushes: DirEntry,
-    edges: DirEntry,
-    surf_edges: DirEntry,
-    models: DirEntry,
-    brushes: DirEntry,
-    brush_sides: DirEntry,
-    // Appears to be unused, even in Quake 2 itself
-    pop: DirEntry,
-    areas: DirEntry,
-    area_portals: DirEntry,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
-pub struct Header {
-    pub i: u8,
-    pub b: u8,
-    pub s: u8,
-    pub p: u8,
-}
-
-#[derive(Clone, Debug, Default)]
-struct DirEntry {
-    offset: u32,
-    length: u32,
-}
-
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct LeafFace {
         pub face: u16,
@@ -376,39 +231,50 @@ bitflags! {
     }
 }
 
+impl ElementSize for ContentFlags {
+    const SIZE: usize = u32::SIZE;
+}
+
+impl SimpleParse for ContentFlags {
+    fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
+        u32::parse(r).and_then(|v| {
+            ContentFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+        })
+    }
+}
+
+impl ElementSize for SurfaceFlags {
+    const SIZE: usize = u32::SIZE;
+}
+
+impl SimpleParse for SurfaceFlags {
+    fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
+        u32::parse(r).and_then(|v| {
+            SurfaceFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+        })
+    }
+}
+
 const TEXTURE_NAME_SIZE: usize = 32;
 
-#[derive(Default, Debug, Clone)]
-pub struct Texture {
-    pub axis_u: QVec,
-    pub offset_u: f32,
+parseable! {
+    #[derive(Default, Debug, Clone)]
+    pub struct Texture {
+        pub axis_u: QVec,
+        pub offset_u: f32,
 
-    pub axis_v: QVec,
-    pub offset_v: f32,
+        pub axis_v: QVec,
+        pub offset_v: f32,
 
-    pub flags: SurfaceFlags,
-    pub value: i32,
+        pub flags: SurfaceFlags,
+        pub value: i32,
 
-    pub name: ArrayString<[u8; TEXTURE_NAME_SIZE]>,
-    pub next: i32,
+        pub name: ArrayString<[u8; TEXTURE_NAME_SIZE]>,
+        pub next: i32,
+    }
 }
 
-impl ElementSize for Texture {
-    const SIZE: usize = {
-        use std::mem::size_of;
-
-        size_of::<QVec>()
-            + size_of::<f32>()
-            + size_of::<QVec>()
-            + size_of::<f32>()
-            + size_of::<SurfaceFlags>()
-            + size_of::<i32>()
-            + size_of::<u8>() * TEXTURE_NAME_SIZE
-            + size_of::<i32>()
-    };
-}
-
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct Plane {
         pub normal: QVec,
@@ -417,7 +283,7 @@ elsize! {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct Node {
         pub plane: u32,
@@ -431,7 +297,7 @@ elsize! {
 
 pub type Cluster = u16;
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct Leaf {
         pub contents: ContentFlags,
@@ -446,14 +312,14 @@ elsize! {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct LeafBrush {
         pub brush: u32,
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct Model {
         pub mins: QVec,
@@ -465,7 +331,7 @@ elsize! {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct Brush {
         pub brush_side: u32,
@@ -474,7 +340,7 @@ elsize! {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct BrushSide {
         pub plane: u32,
@@ -484,7 +350,7 @@ elsize! {
 
 const MAX_LIGHTMAPS_PER_FACE: usize = 4;
 
-elsize! {
+parseable! {
     #[derive(Debug, Clone)]
     pub struct Face {
         pub plane: u16,
@@ -518,7 +384,7 @@ impl<'a> LightmapRef<'a> {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct Lightvol {
         ambient: [u8; 3],
@@ -555,10 +421,9 @@ impl<R: Read + Seek> BspReader<R> {
         Ok(Entities { entities })
     }
 
-    fn read_entry<F, T, O>(&mut self, dir_entry: &DirEntry, mut f: F) -> io::Result<O>
+    fn read_entry<T, O>(&mut self, dir_entry: &DirEntry) -> io::Result<O>
     where
-        F: FnMut(&mut BspReader<Take<&mut R>>) -> io::Result<T>,
-        T: ElementSize,
+        T: SimpleParse + ElementSize,
         O: FromIterator<T>,
     {
         if dir_entry.length % T::SIZE as u32 != 0 {
@@ -572,13 +437,8 @@ impl<R: Read + Seek> BspReader<R> {
 
         let num_entries = dir_entry.length as usize / T::SIZE;
         self.inner.seek(SeekFrom::Start(dir_entry.offset as u64))?;
-        let mut reader = BspReader {
-            inner: self.inner.by_ref().take(dir_entry.length as u64),
-        };
 
-        iter::repeat_with(move || f(&mut reader))
-            .take(num_entries)
-            .collect()
+        T::parse_many(&mut self.inner, num_entries)
     }
 
     fn read_visdata(&mut self, entry: &DirEntry) -> io::Result<VisData> {
@@ -588,15 +448,15 @@ impl<R: Read + Seek> BspReader<R> {
 
         self.inner.seek(SeekFrom::Start(entry.offset as u64))?;
 
-        let num_clusters = self.inner.read_u32::<LittleEndian>()?;
+        let num_clusters = u32::parse(&mut self.inner)?;
         let mut clusters = Vec::with_capacity(num_clusters.try_into().map_err(|e| error(e))?);
 
         let mut max_offset = 0;
         let visdata_start = std::mem::size_of::<u32>() as u32 * (1 + 2 * num_clusters);
 
         for _ in 0..num_clusters {
-            let pvs = self.inner.read_u32::<LittleEndian>()?;
-            let phs = self.inner.read_u32::<LittleEndian>()?;
+            let pvs = u32::parse(&mut self.inner)?;
+            let phs = u32::parse(&mut self.inner)?;
             max_offset = max_offset.max(pvs).max(phs);
             clusters.push(VisDataOffsets {
                 pvs: pvs - visdata_start,
@@ -649,320 +509,6 @@ impl<R: Read + Seek> BspReader<R> {
     }
 }
 
-impl<R: Read> BspReader<R> {
-    fn read_header(&mut self) -> io::Result<Header> {
-        let i = self.inner.read_u8()?;
-        let b = self.inner.read_u8()?;
-        let s = self.inner.read_u8()?;
-        let p = self.inner.read_u8()?;
-        Ok(Header { i, b, s, p })
-    }
-
-    fn read_version(&mut self) -> io::Result<u32> {
-        self.inner.read_u32::<LittleEndian>()
-    }
-
-    fn read_directories(&mut self) -> io::Result<Directories> {
-        macro_rules! read_dirs {
-            (@inner $out:expr,) => {
-                $out
-            };
-            (@inner $out:expr, $name:ident $(, $rest:ident)*) => {{
-                let mut out = $out;
-                out.$name = {
-                    let offset = self.inner.read_u32::<LittleEndian>()?;
-                    let length = self.inner.read_u32::<LittleEndian>()?;
-                    DirEntry {
-                        offset,
-                        length,
-                    }
-                };
-                read_dirs!(@inner out, $($rest),*)
-            }};
-            ($($any:tt)*) => {{
-                read_dirs!(@inner Directories::default(), $($any)*)
-            }};
-        }
-
-        Ok(read_dirs!(
-            entities,
-            planes,
-            vertices,
-            visdata,
-            nodes,
-            textures,
-            faces,
-            lightmaps,
-            leaves,
-            leaf_faces,
-            leaf_brushes,
-            edges,
-            surf_edges,
-            models,
-            brushes,
-            brush_sides,
-            pop,
-            areas,
-            area_portals
-        ))
-    }
-
-    fn read_texture(&mut self) -> io::Result<Texture> {
-        let axis_u = [
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-        ]
-        .into();
-        let offset_u = self.inner.read_f32::<LittleEndian>()?;
-
-        let axis_v = [
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-        ]
-        .into();
-        let offset_v = self.inner.read_f32::<LittleEndian>()?;
-
-        let flags = SurfaceFlags::from_bits(self.inner.read_u32::<LittleEndian>()?)
-            .ok_or_else(|| error("Invalid surface flag in texture"))?;
-        let value = self.inner.read_i32::<LittleEndian>()?;
-
-        let name = self.read_name()?;
-        let next = self.inner.read_i32::<LittleEndian>()?;
-
-        Ok(Texture {
-            axis_u,
-            offset_u,
-            axis_v,
-            offset_v,
-            flags,
-            value,
-            name,
-            next,
-        })
-    }
-
-    fn read_plane(&mut self) -> io::Result<Plane> {
-        Ok(Plane {
-            normal: [
-                self.inner.read_f32::<LittleEndian>()?,
-                self.inner.read_f32::<LittleEndian>()?,
-                self.inner.read_f32::<LittleEndian>()?,
-            ]
-            .into(),
-            dist: self.inner.read_f32::<LittleEndian>()?,
-            type_: self.inner.read_u32::<LittleEndian>()?,
-        })
-    }
-
-    fn read_node(&mut self) -> io::Result<Node> {
-        let plane = self.inner.read_u32::<LittleEndian>()?;
-        let children = [
-            self.inner.read_i32::<LittleEndian>()?,
-            self.inner.read_i32::<LittleEndian>()?,
-        ];
-        let mins = [
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-        ];
-        let maxs = [
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-        ];
-        let face = self.inner.read_u16::<LittleEndian>()?;
-        let num_faces = self.inner.read_u16::<LittleEndian>()?;
-        Ok(Node {
-            plane,
-            children,
-            mins,
-            maxs,
-            face,
-            num_faces,
-        })
-    }
-
-    fn read_contentflags(&mut self) -> io::Result<Option<ContentFlags>> {
-        Ok(ContentFlags::from_bits(
-            self.inner.read_u32::<LittleEndian>()?,
-        ))
-    }
-
-    fn read_leaf(&mut self) -> io::Result<Leaf> {
-        let contents = self.read_contentflags()?.unwrap_or_default();
-        let cluster = self.inner.read_i16::<LittleEndian>()?;
-        let area = self.inner.read_u16::<LittleEndian>()?;
-        let mins = [
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-        ];
-        let maxs = [
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-            self.inner.read_i16::<LittleEndian>()?,
-        ];
-        let leaf_face = self.inner.read_u16::<LittleEndian>()?;
-        let num_leaf_faces = self.inner.read_u16::<LittleEndian>()?;
-        let leaf_brush = self.inner.read_u16::<LittleEndian>()?;
-        let num_leaf_brushes = self.inner.read_u16::<LittleEndian>()?;
-
-        Ok(Leaf {
-            contents,
-            cluster,
-            area,
-            mins,
-            maxs,
-            leaf_face,
-            num_leaf_faces,
-            leaf_brush,
-            num_leaf_brushes,
-        })
-    }
-
-    fn read_leaf_face(&mut self) -> io::Result<LeafFace> {
-        let face = self.inner.read_u16::<LittleEndian>()?;
-
-        Ok(LeafFace { face })
-    }
-
-    fn read_leaf_brush(&mut self) -> io::Result<LeafBrush> {
-        let brush = self.inner.read_u32::<LittleEndian>()?;
-
-        Ok(LeafBrush { brush })
-    }
-
-    fn read_model(&mut self) -> io::Result<Model> {
-        let mins = [
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-        ]
-        .into();
-        let maxs = [
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-        ]
-        .into();
-        let origin = [
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-        ]
-        .into();
-        let headnode = self.inner.read_u32::<LittleEndian>()?;
-        let face = self.inner.read_u32::<LittleEndian>()?;
-        let num_faces = self.inner.read_u32::<LittleEndian>()?;
-        Ok(Model {
-            mins,
-            maxs,
-            origin,
-            headnode,
-            face,
-            num_faces,
-        })
-    }
-
-    fn read_brush(&mut self) -> io::Result<Brush> {
-        let brush_side = self.inner.read_u32::<LittleEndian>()?;
-        let num_brush_sides = self.inner.read_u32::<LittleEndian>()?;
-        let contents = self
-            .read_contentflags()?
-            .ok_or_else(|| error("Invalid content flag in brush"))?;
-        let brush = Brush {
-            brush_side,
-            num_brush_sides,
-            contents,
-        };
-        Ok(brush)
-    }
-
-    fn read_brush_side(&mut self) -> io::Result<BrushSide> {
-        let plane = self.inner.read_u32::<LittleEndian>()?;
-        let texture = self.inner.read_u32::<LittleEndian>()?;
-        let brush_side = BrushSide { plane, texture };
-        Ok(brush_side)
-    }
-
-    fn read_edge(&mut self) -> io::Result<Edge> {
-        Ok(Edge {
-            first: self.inner.read_u16::<LittleEndian>()?,
-            second: self.inner.read_u16::<LittleEndian>()?,
-        })
-    }
-
-    fn read_surf_edge(&mut self) -> io::Result<SurfEdge> {
-        Ok(SurfEdge {
-            edge: self.inner.read_i32::<LittleEndian>()?,
-        })
-    }
-
-    fn read_area(&mut self) -> io::Result<Area> {
-        Ok(Area {
-            num_area_portals: self.inner.read_u32::<LittleEndian>()?,
-            area_portal: self.inner.read_u32::<LittleEndian>()?,
-        })
-    }
-
-    fn read_area_portal(&mut self) -> io::Result<AreaPortal> {
-        Ok(AreaPortal {
-            num_portals: self.inner.read_u32::<LittleEndian>()?,
-            other_area: self.inner.read_u32::<LittleEndian>()?,
-        })
-    }
-
-    fn read_vertex(&mut self) -> io::Result<QVec> {
-        Ok([
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-            self.inner.read_f32::<LittleEndian>()?,
-        ]
-        .into())
-    }
-
-    fn read_name(&mut self) -> io::Result<ArrayString<[u8; TEXTURE_NAME_SIZE]>> {
-        use std::str;
-
-        let mut name_buf = [0u8; TEXTURE_NAME_SIZE];
-        self.inner.read_exact(&mut name_buf)?;
-        let zero_pos = name_buf
-            .iter()
-            .position(|c| *c == 0)
-            .ok_or_else(|| error("Name isn't null-terminated"))?;
-        let name = &name_buf[..zero_pos];
-        Ok(
-            ArrayString::from(str::from_utf8(name).map_err(|err| error(err))?).expect(
-                "Programmer error: it should be impossible for the string to exceed the capacity",
-            ),
-        )
-    }
-
-    fn read_face(&mut self) -> io::Result<Face> {
-        let plane = self.inner.read_u16::<LittleEndian>()?;
-        let side = self.inner.read_i16::<LittleEndian>()?;
-        let surf_edge = self.inner.read_u32::<LittleEndian>()?;
-        let num_surf_edges = self.inner.read_u16::<LittleEndian>()?;
-        let texture = self.inner.read_i16::<LittleEndian>()?;
-        let mut styles = [0; MAX_LIGHTMAPS_PER_FACE];
-        self.inner.read_exact(&mut styles)?;
-
-        let lightmap = self.inner.read_i32::<LittleEndian>()?;
-
-        Ok(Face {
-            plane,
-            side,
-            surf_edge,
-            num_surf_edges,
-            texture,
-            styles,
-            lightmap,
-        })
-    }
-}
-
 #[derive(Debug)]
 pub struct Handle<'a, T> {
     bsp: &'a Bsp,
@@ -991,7 +537,7 @@ impl<T> Deref for Handle<'_, T> {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone, Copy)]
     pub struct Edge {
         pub first: u16,
@@ -1008,7 +554,7 @@ impl Edge {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct SurfEdge {
         // Use `abs(edge_index)` for actual index, and `signum(edge_index)` for winding order
@@ -1016,7 +562,7 @@ elsize! {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct Area {
         pub num_area_portals: u32,
@@ -1024,7 +570,7 @@ elsize! {
     }
 }
 
-elsize! {
+parseable! {
     #[derive(Default, Debug, Clone)]
     pub struct AreaPortal {
         pub num_portals: u32,
@@ -1032,10 +578,12 @@ elsize! {
     }
 }
 
+const MAGIC: [u8; 4] = [b'I', b'B', b'S', b'P'];
+
 // TODO: Store all the allocated objects inline to improve cache usage
 #[derive(Default, Debug, Clone)]
 pub struct Bsp {
-    pub header: Header,
+    pub header: Magic<MAGIC>,
     pub entities: Entities,
     pub textures: Box<[Texture]>,
     pub planes: Box<[Plane]>,
@@ -1057,51 +605,44 @@ pub struct Bsp {
 }
 
 impl Bsp {
-    pub fn read<R: Read + Seek>(reader: R) -> io::Result<Self> {
-        const EXPECTED_HEADER: Header = Header {
-            i: b'I',
-            b: b'B',
-            s: b'S',
-            p: b'P',
-        };
+    pub fn read<R: Read + Seek>(mut reader: R) -> io::Result<Self> {
         // TODO: Use this to decide on the version to parse it as
         const EXPECTED_VERSION: u32 = 0x26;
 
-        let mut reader = BspReader { inner: reader };
-        let header = reader.read_header()?;
-        let version = reader.read_version()?;
+        let header = SimpleParse::parse(&mut reader)?;
+        let version = u32::parse(&mut reader)?;
 
-        if header != EXPECTED_HEADER || version != EXPECTED_VERSION {
+        if version != EXPECTED_VERSION {
             return Err(error(format!(
-                "Invalid header or version (expected {:?}, got {:?})",
-                (EXPECTED_HEADER, EXPECTED_VERSION),
-                (header, version)
+                "Invalid version (expected {:?}, got {:?})",
+                EXPECTED_VERSION, version
             )));
         }
 
-        let dir_entries = reader.read_directories()?;
+        let dir_entries = Directories::parse(&mut reader)?;
+
+        let mut reader = BspReader { inner: reader };
 
         let entities = reader.read_entities(&dir_entries.entities)?;
-        let planes = reader.read_entry(&dir_entries.planes, |r| r.read_plane())?;
-        let vertices = reader.read_entry(&dir_entries.vertices, |r| r.read_vertex())?;
+        let planes = reader.read_entry(&dir_entries.planes)?;
+        let vertices = reader.read_entry(&dir_entries.vertices)?;
         let visdata = reader.read_visdata(&dir_entries.visdata)?;
-        let nodes = reader.read_entry(&dir_entries.nodes, |r| r.read_node())?;
-        let textures = reader.read_entry(&dir_entries.textures, |r| r.read_texture())?;
-        let faces = reader.read_entry(&dir_entries.faces, |r| r.read_face())?;
+        let nodes = reader.read_entry(&dir_entries.nodes)?;
+        let textures = reader.read_entry(&dir_entries.textures)?;
+        let faces = reader.read_entry(&dir_entries.faces)?;
         let lightmaps = reader.read_lightmaps(&dir_entries.lightmaps)?;
-        let mut leaves: Box<[_]> = reader.read_entry(&dir_entries.leaves, |r| r.read_leaf())?;
+        let mut leaves: Box<[Leaf]> = reader.read_entry(&dir_entries.leaves)?;
         leaves.sort_unstable_by_key(|leaf| leaf.cluster);
 
-        let leaf_faces = reader.read_entry(&dir_entries.leaf_faces, |r| r.read_leaf_face())?;
-        let leaf_brushes = reader.read_entry(&dir_entries.leaf_brushes, |r| r.read_leaf_brush())?;
-        let edges = reader.read_entry(&dir_entries.edges, |r| r.read_edge())?;
-        let surf_edges = reader.read_entry(&dir_entries.surf_edges, |r| r.read_surf_edge())?;
-        let models = reader.read_entry(&dir_entries.models, |r| r.read_model())?;
-        let brushes = reader.read_entry(&dir_entries.brushes, |r| r.read_brush())?;
-        let brush_sides = reader.read_entry(&dir_entries.brush_sides, |r| r.read_brush_side())?;
-        let areas = reader.read_entry(&dir_entries.areas, |r| r.read_area())?;
-        let area_portals =
-            reader.read_entry(&dir_entries.area_portals, |r| r.read_area_portal())?;
+        let leaf_faces = reader.read_entry(&dir_entries.leaf_faces)?;
+        let leaf_brushes = reader.read_entry(&dir_entries.leaf_brushes)?;
+        let edges = reader.read_entry(&dir_entries.edges)?;
+        let surf_edges = reader.read_entry(&dir_entries.surf_edges)?;
+        let models = reader.read_entry(&dir_entries.models)?;
+        let brushes = reader.read_entry(&dir_entries.brushes)?;
+        let brush_sides = reader.read_entry(&dir_entries.brush_sides)?;
+        let areas = reader.read_entry(&dir_entries.areas)?;
+        let area_portals = reader.read_entry(&dir_entries.area_portals)?;
 
         Ok({
             Bsp {
@@ -1471,47 +1012,5 @@ impl<'a> Handle<'a, Leaf> {
     pub fn faces(self) -> impl Iterator<Item = Handle<'a, Face>> {
         self.leaf_faces()
             .filter_map(move |leaf_face| self.bsp.face(leaf_face.face as usize))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Bsp;
-
-    const MAP_BYTES: &[u8] = include_bytes!("../test.bsp");
-
-    #[test]
-    fn random_file() {
-        use std::io::Cursor;
-
-        Bsp::read(&mut Cursor::new(MAP_BYTES)).unwrap();
-    }
-
-    #[cfg(feature = "bench")]
-    mod benches {
-        use super::{Bsp, MAP_BYTES};
-        use test::Bencher;
-
-        #[bench]
-        fn from_bytes(b: &mut Bencher) {
-            use std::io::Cursor;
-
-            b.iter(|| {
-                Bsp::read(&mut Cursor::new(MAP_BYTES)).unwrap();
-            });
-        }
-
-        #[bench]
-        fn leaf_at(b: &mut Bencher) {
-            use std::io::Cursor;
-
-            let bsp = Bsp::read(&mut Cursor::new(MAP_BYTES)).unwrap();
-
-            b.iter(|| {
-                test::black_box(
-                    bsp.leaf_at::<crate::XEastYSouthZUp>(test::black_box([0., 0., 0.].into())),
-                );
-            });
-        }
     }
 }

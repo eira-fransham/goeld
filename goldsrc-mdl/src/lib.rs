@@ -16,7 +16,7 @@ use types::{
 
 #[cfg(not(debug_assertions))]
 fn error(msg: impl ToString) -> io::Error {
-    Error::new(ErrorKind::InvalidData, msg.to_string())
+    io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
 #[cfg(debug_assertions)]

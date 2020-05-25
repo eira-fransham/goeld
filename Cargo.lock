@@ -36,6 +36,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8052e2d8aabbb8d556d6abbcce2a22b9590996c5f849b9c7ce4544a2e3b984e"
 
 [[package]]
+name = "anyhow"
+version = "1.0.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85bb70cc08ec97ca5450e6eba421deeea5f172c0fc61f78b5357b2a8e8be195f"
+
+[[package]]
 name = "approx"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -108,6 +114,7 @@ dependencies = [
  "bitflags",
  "bv",
  "goldsrc-format-common",
+ "image",
  "itertools",
 ]
 
@@ -1675,6 +1682,7 @@ dependencies = [
 name = "unforseen-consequences-rust"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bsp",
  "bytemuck",
  "cgmath",

@@ -4,12 +4,23 @@ use std::path::Path;
 
 const DATA_FOLDER: &str = "data";
 const TEXTURE_FOLDER: &str = "textures";
+const ENV_FOLDER: &str = "env";
 const MAP_FOLDER: &str = "maps";
 const MODEL_FOLDER: &str = "models";
 
 const MAP_EXTENSIONS: &[&str] = &["bsp"];
 const TEXTURE_EXTENSIONS: &[&str] = &["bmp", "png", "tga", "gif", "tiff", "jpg", "jpeg"];
 const MODEL_EXTENSIONS: &[&str] = &["mdl"];
+
+pub trait LoadAsset {
+    type Asset;
+
+    fn load(
+        self,
+        loader: &Loader,
+        cache: &mut crate::render::RenderCache,
+    ) -> anyhow::Result<Self::Asset>;
+}
 
 pub struct Loader {
     _noconstruct: (),
@@ -142,6 +153,7 @@ impl Load for Loader {
     fn load<'a>(&self, filename: Cow<'a, Path>) -> io::Result<(Self::Reader, Cow<'a, Path>)> {
         Ok((std::fs::File::open(filename.as_ref())?, filename))
     }
+
     fn exists<'a>(&self, filename: Cow<'a, Path>) -> io::Result<(bool, Cow<'a, Path>)> {
         Ok((filename.exists(), filename))
     }
@@ -160,6 +172,15 @@ impl Loader {
         WithExtensions {
             inner: CaseInsensitive {
                 inner: WithPath::<_, TEXTURE_FOLDER> { inner: self.data() },
+            },
+            extensions: TEXTURE_EXTENSIONS,
+        }
+    }
+
+    pub fn env(&self) -> impl Load + '_ {
+        WithExtensions {
+            inner: CaseInsensitive {
+                inner: WithPath::<_, ENV_FOLDER> { inner: self.data() },
             },
             extensions: TEXTURE_EXTENSIONS,
         }

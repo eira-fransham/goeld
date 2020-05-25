@@ -2,7 +2,10 @@
 
 use arrayvec::{Array, ArrayString, ArrayVec};
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::{io, iter, num};
+use std::{
+    io::{self, Error, ErrorKind},
+    iter, num,
+};
 
 #[cfg(not(debug_assertions))]
 fn error(msg: impl ToString) -> io::Error {
@@ -19,7 +22,7 @@ mod magic {
     use super::{ElementSize, SimpleParse};
     use std::{fmt, io, ops};
 
-    #[derive(Default, Copy, Clone)]
+    #[derive(PartialEq, Default, Copy, Clone)]
     pub struct Magic<const VALUE: [u8; 4]>;
 
     impl<const V: [u8; 4]> fmt::Debug for Magic<V> {
@@ -285,9 +288,11 @@ pub trait CoordSystem: Sized {
     fn from_qvec(vec: QVec) -> V3<Self>;
 }
 
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Default, Copy, Clone)]
 pub struct XEastYSouthZUp;
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Default, Copy, Clone)]
+pub struct XEastYNorthZUp;
+#[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Default, Copy, Clone)]
 pub struct XEastYDownZSouth;
 
 impl CoordSystem for XEastYSouthZUp {
@@ -309,7 +314,16 @@ impl CoordSystem for XEastYDownZSouth {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+impl CoordSystem for XEastYNorthZUp {
+    fn into_qvec(vec: V3<Self>) -> QVec {
+        V3::new([vec.x(), -vec.y(), vec.y()])
+    }
+    fn from_qvec(vec: QVec) -> V3<Self> {
+        V3::new([vec.x(), -vec.y(), vec.z()])
+    }
+}
+
+#[derive(PartialEq, PartialOrd, Debug, Default, Clone, Copy)]
 // So that we can ensure that `size_of` correctly reports the size of this type.
 // `C` should be a ZST but if it isn't then this should still act correctly.
 #[repr(C)]
@@ -380,7 +394,7 @@ impl<C: Default> V3<C> {
 
 impl<C> V3<C> {
     pub fn dot(&self, other: &Self) -> f32 {
-        self.0.iter().zip(other.0.iter()).map(|(a, b)| a * b).sum()
+        self.x() * other.x() + self.y() * other.y() + self.z() * other.z()
     }
 }
 

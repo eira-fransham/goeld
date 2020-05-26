@@ -88,7 +88,7 @@ where
                     tex_rect.height as f32,
                 ],
                 tex_coord: [u, v],
-                value: texture.value as f32 / u8::max_value() as f32,
+                value: texture.value as f32 / 255.,
                 lightmap_coord: lightmap
                     .map(|((minu, minv), lightmap_result)| {
                         [
@@ -96,7 +96,7 @@ where
                             (lightmap_result.first.y as f32 + (v / 16.).floor() - minv),
                         ]
                     })
-                    .unwrap_or([0., 0.]),
+                    .unwrap_or_default(),
                 lightmap_width: lightmap
                     .map(|(_, lightmap_result)| lightmap_result.stride_x as f32)
                     .unwrap_or_default(),

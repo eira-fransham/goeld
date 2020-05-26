@@ -48,7 +48,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device);
+    let mut renderer = Renderer::init(&device, 1.4, 1.4);
     let mut sky = None;
     let mut camera = None;
 
@@ -97,8 +97,12 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         }
     }
 
-    let sky = sky
-        .and_then(|sky| {
+    let sky = if bsp
+        .textures
+        .iter()
+        .any(|t| t.flags.contains(bsp::SurfaceFlags::SKY))
+    {
+        sky.and_then(|sky| {
             sky.load(&loader, renderer.cache_mut())
                 .map_err(|e| dbg!(e))
                 .ok()
@@ -108,7 +112,10 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 .load(&loader, renderer.cache_mut())
                 .map_err(|e| dbg!(e))
                 .ok()
-        });
+        })
+    } else {
+        None
+    };
 
     let mut camera = camera.unwrap_or(Camera::new(cgmath::Deg(70.), size.width, size.height));
 

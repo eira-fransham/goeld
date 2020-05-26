@@ -249,7 +249,7 @@ impl DoRender for RenderContext<'_> {
 }
 
 impl Renderer {
-    pub fn init(device: &wgpu::Device) -> Self {
+    pub fn init(device: &wgpu::Device, gamma: f32, intensity: f32) -> Self {
         let cache = RenderCache::new(device);
 
         let diffuse_atlas_view = cache.diffuse.texture_view();
@@ -293,6 +293,8 @@ impl Renderer {
                 cache.diffuse.height() as f32,
                 cache.lightmap.width() as f32,
                 cache.lightmap.height() as f32,
+                1. / gamma,
+                intensity,
             ]),
             wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
         );
@@ -336,8 +338,7 @@ impl Renderer {
     where
         F: FnOnce(RenderContext<'_>),
     {
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
 
         self.cache.update(device, &mut encoder);
 

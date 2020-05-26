@@ -11,6 +11,10 @@ use winit::{
     window::Window,
 };
 
+#[global_allocator]
+#[cfg(feature = "jeamllocator")]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 mod assets;
 mod cache;
 mod loader;

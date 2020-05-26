@@ -21,8 +21,10 @@ only hurdle to implementing Goldsrc and Quake 1 maps, however.
 ![Screenshot 3](screenshots/03.png)
 
 I've also got a parser for the monstrosity that is the Goldsrc .mdl format, so my next task is to
-get Half-Life 1 models loading, displaying and animating in this engine. I have a pretty good idea
-of the game I want to build using this engine.
+get Half-Life 1 models loading, displaying and animating in this engine. It's very, very likely that
+I'll switch to updating the already-existing bindings to `assimp` and using those instead, since I'm
+certain that my existing parser is buggy (since the format is a mess) and integrating with `assimp`
+allows me to support every model format that it supports, instead of only .mdl.
 
 ## How to use
 

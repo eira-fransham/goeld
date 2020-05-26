@@ -97,11 +97,18 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         }
     }
 
-    let sky = sky.and_then(|sky| {
-        sky.load(&loader, renderer.cache_mut())
-            .map_err(|e| dbg!(e))
-            .ok()
-    });
+    let sky = sky
+        .and_then(|sky| {
+            sky.load(&loader, renderer.cache_mut())
+                .map_err(|e| dbg!(e))
+                .ok()
+        })
+        .or_else(|| {
+            SkyboxAsset("unit1_".into())
+                .load(&loader, renderer.cache_mut())
+                .map_err(|e| dbg!(e))
+                .ok()
+        });
 
     let mut camera = camera.unwrap_or(Camera::new(cgmath::Deg(70.), size.width, size.height));
 
@@ -126,7 +133,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
         usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
-        label: None,
+        label: Some("tex_depth"),
     };
 
     let mut depth_texture = device.create_texture(&depth_texture_desc);
@@ -136,70 +143,81 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
     let mut swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
     let mut last_update_inst = time::Instant::now();
+    let mut last_render_inst = time::Instant::now();
 
     const FPS: f64 = 60.;
     const DT: f64 = 1. / FPS;
     const DEG_PER_SEC: cgmath::Deg<f32> = cgmath::Deg(30.);
-    const MOVEMENT_VEL: cgmath::Vector3<f32> = cgmath::Vector3::new(1., 0., 0.);
+    const MOVEMENT_VEL: cgmath::Vector3<f32> = cgmath::Vector3::new(400., 0., 0.);
 
     let mut lock_mouse = false;
     let mut keys_down = HashSet::default();
 
+    let update_dt = time::Duration::from_secs_f64(DT);
+    let render_dt = time::Duration::from_secs_f64(DT);
+
     event_loop.run(move |event, _, control_flow| {
-        let _ = (&instance, &adapter); // force ownership by the closure
+        *control_flow = ControlFlow::WaitUntil(
+            (last_update_inst + update_dt).min(last_render_inst + render_dt),
+        );
 
-        if true {
-            *control_flow =
-                ControlFlow::WaitUntil(last_update_inst + time::Duration::from_secs_f64(DT));
-        } else {
-            *control_flow = ControlFlow::Exit;
-        }
+        let mut elapsed = last_update_inst.elapsed();
 
-        for keycode in &keys_down {
-            match keycode {
-                event::VirtualKeyCode::Up => {
-                    camera.pitch -= DEG_PER_SEC * DT as f32;
+        if elapsed >= update_dt {
+            while elapsed >= update_dt {
+                for keycode in &keys_down {
+                    match keycode {
+                        event::VirtualKeyCode::Up => {
+                            camera.pitch -= DEG_PER_SEC * DT as f32;
+                        }
+                        event::VirtualKeyCode::Down => {
+                            camera.pitch += DEG_PER_SEC * DT as f32;
+                        }
+                        event::VirtualKeyCode::Right => {
+                            camera.yaw -= DEG_PER_SEC * DT as f32;
+                        }
+                        event::VirtualKeyCode::Left => {
+                            camera.yaw += DEG_PER_SEC * DT as f32;
+                        }
+                        event::VirtualKeyCode::W => {
+                            camera.position += cgmath::Matrix3::from_angle_z(camera.yaw)
+                                * cgmath::Matrix3::from_angle_y(camera.pitch)
+                                * MOVEMENT_VEL
+                                * DT as f32;
+                        }
+                        event::VirtualKeyCode::S => {
+                            camera.position -= cgmath::Matrix3::from_angle_z(camera.yaw)
+                                * cgmath::Matrix3::from_angle_y(camera.pitch)
+                                * MOVEMENT_VEL
+                                * DT as f32;
+                        }
+                        event::VirtualKeyCode::A => {
+                            camera.position +=
+                                cgmath::Matrix3::from_angle_z(camera.yaw + cgmath::Deg(90.))
+                                    * MOVEMENT_VEL
+                                    * DT as f32;
+                        }
+                        event::VirtualKeyCode::D => {
+                            camera.position +=
+                                cgmath::Matrix3::from_angle_z(camera.yaw - cgmath::Deg(90.))
+                                    * MOVEMENT_VEL
+                                    * DT as f32;
+                        }
+                        _ => {}
+                    }
                 }
-                event::VirtualKeyCode::Down => {
-                    camera.pitch += DEG_PER_SEC * DT as f32;
-                }
-                event::VirtualKeyCode::Right => {
-                    camera.yaw -= DEG_PER_SEC * DT as f32;
-                }
-                event::VirtualKeyCode::Left => {
-                    camera.yaw += DEG_PER_SEC * DT as f32;
-                }
-                event::VirtualKeyCode::W => {
-                    camera.position += cgmath::Matrix3::from_angle_z(camera.yaw)
-                        * cgmath::Matrix3::from_angle_y(camera.pitch)
-                        * MOVEMENT_VEL
-                        * DT as f32;
-                }
-                event::VirtualKeyCode::S => {
-                    camera.position -= cgmath::Matrix3::from_angle_z(camera.yaw)
-                        * cgmath::Matrix3::from_angle_y(camera.pitch)
-                        * MOVEMENT_VEL
-                        * DT as f32;
-                }
-                event::VirtualKeyCode::A => {
-                    camera.position += cgmath::Matrix3::from_angle_z(camera.yaw + cgmath::Deg(90.))
-                        * MOVEMENT_VEL
-                        * DT as f32;
-                }
-                event::VirtualKeyCode::D => {
-                    camera.position += cgmath::Matrix3::from_angle_z(camera.yaw - cgmath::Deg(90.))
-                        * MOVEMENT_VEL
-                        * DT as f32;
-                }
-                _ => {}
+
+                elapsed -= update_dt;
             }
+
+            last_update_inst = time::Instant::now() - elapsed;
         }
 
         match event {
             Event::MainEventsCleared => {
-                if last_update_inst.elapsed() > time::Duration::from_millis(20) {
+                if last_render_inst.elapsed() > render_dt {
                     window.request_redraw();
-                    last_update_inst = time::Instant::now();
+                    last_render_inst = time::Instant::now();
                 }
             }
             Event::WindowEvent {
@@ -314,6 +332,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                         |mut ctx| {
                             ctx.render(sky);
                         },
+                        Some("render_skybox"),
                     )
                 });
 
@@ -327,6 +346,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     |mut ctx| {
                         ctx.render(&bsp);
                     },
+                    Some("render_world"),
                 );
 
                 queue.submit(command_buf);

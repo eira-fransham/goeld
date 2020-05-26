@@ -92,7 +92,7 @@ macro_rules! impl_simpleparse_tup {
         }
 
         impl SimpleParse for () {
-            fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
+            fn parse<R: io::Read>(_: &mut R) -> io::Result<Self> {
                 Ok(())
             }
         }

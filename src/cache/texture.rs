@@ -1,4 +1,4 @@
-use image::{GenericImageView, Pixel, RgbaImage};
+use image::{GenericImageView, Pixel};
 use rect_packer::{Config, Packer, Rect};
 
 use crate::cache::{Cache, CacheCommon};
@@ -14,6 +14,35 @@ pub struct Atlas {
     padding: u32,
     width: u32,
     height: u32,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct AppendManyResult {
+    pub first: Rect,
+    pub all: Rect,
+    pub stride_x: i32,
+    // stride_y: i32,
+}
+
+impl Default for AppendManyResult {
+    fn default() -> Self {
+        Self {
+            first: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            all: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            stride_x: 0,
+            // stride_y: 0,
+        }
+    }
 }
 
 impl Atlas {
@@ -46,19 +75,19 @@ impl Atlas {
         self.height
     }
 
-    pub fn append_many<I, Img>(&mut self, each_width: u32, each_height: u32, iter: I) -> Rect
+    pub fn append_many<I, Img>(
+        &mut self,
+        each_width: u32,
+        each_height: u32,
+        iter: I,
+    ) -> AppendManyResult
     where
         I: ExactSizeIterator<Item = Img>,
         Img: GenericImageView,
         Img::Pixel: Pixel<Subpixel = <<CachedImage as GenericImageView>::Pixel as Pixel>::Subpixel>,
     {
         if each_width == 0 || each_height == 0 {
-            return Rect {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-            };
+            return Default::default();
         }
 
         let allocated_width =
@@ -72,6 +101,12 @@ impl Atlas {
         let pad = self.padding as i32;
         let prev_size = self.cache.len();
 
+        let total_space =
+            (4 * (allocated_width + self.padding * 2) * (each_height + self.padding * 2)) as usize;
+        self.cache.reserve(total_space);
+
+        let mut current_x = rect.x - pad;
+
         for image in iter {
             let (width, height) = image.dimensions();
 
@@ -79,7 +114,7 @@ impl Atlas {
             debug_assert_eq!(height, each_height);
 
             for y in -pad..each_height as i32 + pad {
-                for x in -pad..width as i32 + pad {
+                for x in -pad..each_width as i32 + pad {
                     let src_x = x.min(width as i32 - 1).max(0) as u32;
                     let src_y = y.min(height as i32 - 1).max(0) as u32;
 
@@ -87,21 +122,29 @@ impl Atlas {
                         .extend(&image.get_pixel(src_x, src_y).to_rgba().0);
                 }
             }
+
+            let width = width as i32 + 2 * pad;
+            self.unwritten.push(Rect {
+                x: current_x,
+                y: rect.y - pad,
+                width,
+                height: height as i32 + 2 * pad,
+            });
+
+            current_x += width;
         }
 
-        assert_eq!(
-            self.cache.len() - prev_size,
-            (4 * (allocated_width + self.padding * 2) * (each_height + self.padding * 2)) as usize
-        );
+        debug_assert_eq!(self.cache.len() - prev_size, total_space);
 
-        self.unwritten.push(Rect {
-            x: rect.x - pad,
-            y: rect.y - pad,
-            width: allocated_width as i32 + 2 * pad,
-            height: rect.height + 2 * pad,
-        });
-
-        rect
+        AppendManyResult {
+            first: Rect {
+                width: each_width as i32,
+                height: each_height as i32,
+                ..rect
+            },
+            all: rect,
+            stride_x: each_width as i32 + 2 * pad,
+        }
     }
 }
 
@@ -162,5 +205,6 @@ where
         let (width, height) = image.dimensions();
 
         self.append_many(width, height, std::iter::once(image))
+            .first
     }
 }

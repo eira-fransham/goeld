@@ -24,5 +24,8 @@ anyhow = "1"
 [workspace]
 members = ["bsp", "goldsrc-mdl", "goldsrc-format-common"]
 
+[profile.release]
+codegen-units = 1
+
 [profile.dev]
 opt-level = 1

@@ -1,11 +1,10 @@
 use crate::{
-    cache::{Atlas, Cache, CacheCommon},
+    cache::{Atlas, Cache},
     loader::{Load, LoadAsset, Loader},
     render::{Render, RenderCache, RenderContext, Vertex},
 };
 use cgmath::{InnerSpace, Matrix};
-use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
-use itertools::Either;
+use fnv::FnvHashMap as HashMap;
 use std::ops::Range;
 
 pub struct BspAsset(pub bsp::Bsp);
@@ -18,6 +17,7 @@ pub struct World {
     model_ranges: Vec<Range<u32>>,
 }
 
+#[inline]
 fn leaf_meshes<'a, F>(
     bsp: &'a bsp::Bsp,
     face_start_indices: &'a mut Vec<u32>,
@@ -90,16 +90,16 @@ where
                 tex_coord: [u, v],
                 value: texture.value as f32 / u8::max_value() as f32,
                 lightmap_coord: lightmap
-                    .map(|((minu, minv), lightmap_rect)| {
+                    .map(|((minu, minv), lightmap_result)| {
                         [
-                            (lightmap_rect.x as f32 + (u / 16.).floor() - minu),
-                            (lightmap_rect.y as f32 + (v / 16.).floor() - minv),
+                            (lightmap_result.first.x as f32 + (u / 16.).floor() - minu),
+                            (lightmap_result.first.y as f32 + (v / 16.).floor() - minv),
                         ]
                     })
                     .unwrap_or([0., 0.]),
-                // TODO: How do we prevent this from relying on `lightmap_cache`'s precise padding
-                //       value?
-                lightmap_width: (w + 2) as f32,
+                lightmap_width: lightmap
+                    .map(|(_, lightmap_result)| lightmap_result.stride_x as f32)
+                    .unwrap_or_default(),
                 lightmap_count: count,
             }
         }));
@@ -144,9 +144,9 @@ where
 impl LoadAsset for BspAsset {
     type Asset = World;
 
+    #[inline]
     fn load(self, loader: &Loader, cache: &mut RenderCache) -> anyhow::Result<Self::Asset> {
-        use itertools::Itertools;
-        use std::{collections::hash_map::Entry, convert::TryFrom, path::Path};
+        use std::{collections::hash_map::Entry, path::Path};
 
         let mut buf = Vec::new();
         let Self(bsp) = self;
@@ -231,6 +231,7 @@ impl LoadAsset for BspAsset {
             struct ThrowAway;
 
             impl<T> std::iter::FromIterator<T> for ThrowAway {
+                #[inline]
                 fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
                     for _ in iter {}
 
@@ -268,6 +269,7 @@ pub struct WorldIndexIter<'a> {
 impl Iterator for WorldIndexIter<'_> {
     type Item = Range<u32>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let Self {
             clusters,
@@ -301,6 +303,7 @@ struct Clipper {
 }
 
 impl Clipper {
+    #[inline]
     pub fn new(matrix: cgmath::Matrix4<f32>) -> Self {
         let planes = [
             (matrix.row(3) + matrix.row(0)),
@@ -324,6 +327,7 @@ impl Clipper {
     }
 
     /// Check if the given sphere is within the Frustum
+    #[inline]
     pub fn check_sphere(&self, center: cgmath::Vector3<f32>, radius: f32) -> bool {
         for plane in &self.planes {
             if plane.truncate().dot(center) + plane.w <= -radius {
@@ -338,6 +342,7 @@ impl Clipper {
 mod hack {
     pub type ImplTraitHack<'a> = impl Iterator<Item = u16> + Clone + 'a;
 
+    #[inline]
     pub fn impl_trait_hack(vis: &bsp::Vis, cluster: Option<u16>) -> ImplTraitHack<'_> {
         cluster
             .into_iter()
@@ -348,6 +353,7 @@ mod hack {
 impl<'a> Render for &'a World {
     type Indices = WorldIndexIter<'a>;
 
+    #[inline]
     fn indices(self, ctx: &RenderContext) -> (u64, Self::Indices) {
         let pos: [f32; 3] = ctx.camera.position.into();
         let cluster_ranges: &'a [Range<u32>] = &self.cluster_ranges;

@@ -21,18 +21,83 @@ use std::{
 };
 
 #[cfg(not(debug_assertions))]
+#[inline]
 fn error(msg: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
 #[cfg(debug_assertions)]
+#[inline]
 fn error(msg: impl ToString) -> io::Error {
     panic!("{}", msg.to_string())
 }
 
+pub trait BspFormat {
+    const VERSION: u32;
+
+    type Magic: SimpleParse;
+    type Directories: ElementSize + SimpleParse + Into<Quake2Directories>;
+}
+
+pub struct Quake2;
+
+const QUAKE2_MAGIC: [u8; 4] = [b'I', b'B', b'S', b'P'];
+
+impl BspFormat for Quake2 {
+    type Magic = Magic<QUAKE2_MAGIC>;
+
+    const VERSION: u32 = 0x26;
+
+    type Directories = Quake2Directories;
+}
+
+pub struct Goldsrc;
+
+impl BspFormat for Goldsrc {
+    const VERSION: u32 = 0x1e;
+
+    type Magic = ();
+    type Directories = GoldsrcDirectories;
+}
+
 parseable! {
     #[derive(Debug, Default, PartialEq)]
-    struct Directories {
+    pub struct GoldsrcDirectories {
+        entities: DirEntry,
+        planes: DirEntry,
+        // TODO: In Goldsrc, `textures` is for _inline textures_, and `texinfo` is more
+        //       similar to the `textures` lump in Quake 2.
+        textures: DirEntry,
+        vertices: DirEntry,
+        visdata: DirEntry,
+        nodes: DirEntry,
+        faces: DirEntry,
+        lightmaps: DirEntry,
+        clipnodes: DirEntry,
+        leaves: DirEntry,
+        leaf_faces: DirEntry,
+        leaf_brushes: DirEntry,
+        edges: DirEntry,
+        surf_edges: DirEntry,
+        models: DirEntry,
+        brushes: DirEntry,
+        brush_sides: DirEntry,
+        // Appears to be unused, even in Quake 2 itself
+        areas: DirEntry,
+        area_portals: DirEntry,
+    }
+}
+
+impl From<GoldsrcDirectories> for Quake2Directories {
+    #[inline]
+    fn from(_other: GoldsrcDirectories) -> Self {
+        todo!()
+    }
+}
+
+parseable! {
+    #[derive(Debug, Default, PartialEq)]
+    pub struct Quake2Directories {
         entities: DirEntry,
         planes: DirEntry,
         vertices: DirEntry,
@@ -77,6 +142,7 @@ pub struct Entities {
 }
 
 impl fmt::Debug for Entities {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         #[derive(Default, Debug, PartialEq)]
         struct Entities<'a> {
@@ -91,6 +157,7 @@ impl fmt::Debug for Entities {
 }
 
 impl Entities {
+    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = Entity<'_>> {
         struct Iter<'a> {
             buf: &'a str,
@@ -99,6 +166,7 @@ impl Entities {
         impl<'a> Iterator for Iter<'a> {
             type Item = Entity<'a>;
 
+            #[inline]
             fn next(&mut self) -> Option<Self::Item> {
                 let start = self.buf.find('{')? + 1;
                 let end = start + self.buf[start..].find('}')?;
@@ -123,6 +191,7 @@ pub struct Entity<'a> {
 }
 
 impl fmt::Debug for Entity<'_> {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use std::collections::HashMap;
 
@@ -131,6 +200,7 @@ impl fmt::Debug for Entity<'_> {
 }
 
 impl<'a> Entity<'a> {
+    #[inline]
     pub fn properties(&self) -> impl Iterator<Item = (&'a str, &'a str)> {
         struct Iter<'a> {
             buf: &'a str,
@@ -139,6 +209,7 @@ impl<'a> Entity<'a> {
         impl<'a> Iterator for Iter<'a> {
             type Item = (&'a str, &'a str);
 
+            #[inline]
             fn next(&mut self) -> Option<Self::Item> {
                 let start = self.buf.find('"')? + 1;
                 let end = start + self.buf[start..].find('"')?;
@@ -187,6 +258,7 @@ bitflags! {
 }
 
 impl SurfaceFlags {
+    #[inline]
     pub fn should_draw(&self) -> bool {
         !self.intersects(Self::HINT | Self::SKIP | Self::NODRAW | Self::LIGHTFILTER)
     }
@@ -236,6 +308,7 @@ impl ElementSize for ContentFlags {
 }
 
 impl SimpleParse for ContentFlags {
+    #[inline]
     fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
         u32::parse(r).and_then(|v| {
             ContentFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
@@ -248,6 +321,7 @@ impl ElementSize for SurfaceFlags {
 }
 
 impl SimpleParse for SurfaceFlags {
+    #[inline]
     fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
         u32::parse(r).and_then(|v| {
             SurfaceFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
@@ -267,7 +341,7 @@ parseable! {
         pub offset_v: f32,
 
         pub flags: SurfaceFlags,
-        pub value: i32,
+        pub value: u32,
 
         pub name: ArrayString<[u8; TEXTURE_NAME_SIZE]>,
         pub next: i32,
@@ -372,18 +446,22 @@ pub struct LightmapRef<'a> {
 }
 
 impl<'a> LightmapRef<'a> {
+    #[inline]
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    #[inline]
     pub fn height(&self) -> u32 {
         self.data.len() as u32 / 3 / self.width
     }
 
+    #[inline]
     pub fn size(&self) -> (u32, u32) {
         (self.width(), self.height())
     }
 
+    #[inline]
     pub fn as_image(&self) -> image::ImageBuffer<image::Rgb<u8>, &'a [u8]> {
         image::ImageBuffer::from_raw(self.width(), self.height(), self.data).unwrap()
     }
@@ -415,6 +493,7 @@ struct BspReader<R> {
 }
 
 impl<R: Read + Seek> BspReader<R> {
+    #[inline]
     fn read_entities(&mut self, dir_entry: &DirEntry) -> io::Result<Entities> {
         let mut entities = Vec::with_capacity(dir_entry.length as usize);
         self.inner.seek(SeekFrom::Start(dir_entry.offset as u64))?;
@@ -426,6 +505,7 @@ impl<R: Read + Seek> BspReader<R> {
         Ok(Entities { entities })
     }
 
+    #[inline]
     fn read_entry<T, O>(&mut self, dir_entry: &DirEntry) -> io::Result<O>
     where
         T: SimpleParse + ElementSize,
@@ -446,6 +526,7 @@ impl<R: Read + Seek> BspReader<R> {
         T::parse_many(&mut self.inner, num_entries)
     }
 
+    #[inline]
     fn read_visdata(&mut self, entry: &DirEntry) -> io::Result<VisData> {
         if (entry.length as usize) < std::mem::size_of::<u32>() * 2 {
             return Ok(VisData::default());
@@ -540,6 +621,7 @@ impl<R: Read + Seek> BspReader<R> {
         })
     }
 
+    #[inline]
     fn read_lightmaps(&mut self, dir_entry: &DirEntry) -> io::Result<Box<[u8]>> {
         self.inner.seek(SeekFrom::Start(dir_entry.offset as u64))?;
 
@@ -553,7 +635,7 @@ impl<R: Read + Seek> BspReader<R> {
             return Err(ErrorKind::UnexpectedEof.into());
         }
 
-        assert_eq!(vec.len() % 3, 0);
+        debug_assert_eq!(vec.len() % 3, 0);
 
         Ok(vec.into_boxed_slice())
     }
@@ -566,12 +648,14 @@ pub struct Handle<'a, B, T> {
 }
 
 impl<'a, B, T> Handle<'a, B, T> {
+    #[inline]
     pub fn new(bsp: &'a B, data: &'a T) -> Self {
         Handle { bsp, data }
     }
 }
 
 impl<B, T> Clone for Handle<'_, B, T> {
+    #[inline]
     fn clone(&self) -> Self {
         Handle { ..*self }
     }
@@ -580,6 +664,7 @@ impl<B, T> Clone for Handle<'_, B, T> {
 impl<B, T> Copy for Handle<'_, B, T> {}
 
 impl<'a, B, T> Handle<'a, B, T> {
+    #[inline]
     pub fn as_ref(&self) -> &'a T {
         self.data
     }
@@ -588,6 +673,7 @@ impl<'a, B, T> Handle<'a, B, T> {
 impl<B, T> Deref for Handle<'_, B, T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.data
     }
@@ -602,6 +688,7 @@ parseable! {
 }
 
 impl Edge {
+    #[inline]
     pub fn rev(self) -> Edge {
         Edge {
             first: self.second,
@@ -634,12 +721,9 @@ parseable! {
     }
 }
 
-const MAGIC: [u8; 4] = [b'I', b'B', b'S', b'P'];
-
 // TODO: Store all the allocated objects inline to improve cache usage
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct Bsp {
-    pub header: Magic<MAGIC>,
     pub entities: Entities,
     pub textures: Box<[Texture]>,
     pub leaf_faces: Box<[LeafFace]>,
@@ -666,24 +750,28 @@ pub struct Vis {
 }
 
 impl AsRef<[Leaf]> for Vis {
+    #[inline]
     fn as_ref(&self) -> &[Leaf] {
         &self.leaves
     }
 }
 
 impl AsRef<[Node]> for Vis {
+    #[inline]
     fn as_ref(&self) -> &[Node] {
         &self.nodes
     }
 }
 
 impl AsRef<[Plane]> for Vis {
+    #[inline]
     fn as_ref(&self) -> &[Plane] {
         &self.planes
     }
 }
 
 impl Vis {
+    #[inline]
     pub fn node(&self, n: usize) -> Option<Handle<'_, Self, Node>> {
         self.nodes.get(n).map(|node| Handle {
             bsp: self,
@@ -691,10 +779,12 @@ impl Vis {
         })
     }
 
+    #[inline]
     pub fn root_node(&self) -> Option<Handle<'_, Self, Node>> {
         self.node(self.models.get(0)?.headnode as usize)
     }
 
+    #[inline]
     pub fn leaf(&self, n: usize) -> Option<Handle<'_, Self, Leaf>> {
         self.leaves.get(n).map(|leaf| Handle {
             bsp: self,
@@ -702,6 +792,7 @@ impl Vis {
         })
     }
 
+    #[inline]
     pub fn plane(&self, n: usize) -> Option<Handle<'_, Self, Plane>> {
         self.planes.get(n).map(|plane| Handle {
             bsp: self,
@@ -709,6 +800,7 @@ impl Vis {
         })
     }
 
+    #[inline]
     pub fn model(&self, n: usize) -> Option<Handle<'_, Self, Model>> {
         self.models.get(n).map(|model| Handle {
             bsp: self,
@@ -716,10 +808,12 @@ impl Vis {
         })
     }
 
+    #[inline]
     pub fn models(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Model>> + Clone {
         self.models.iter().map(move |m| Handle::new(self, m))
     }
 
+    #[inline]
     fn potential_set(
         &self,
         leaf_id: usize,
@@ -749,14 +843,17 @@ impl Vis {
             .unwrap_or(Either::Right(0..self.leaves.len()))
     }
 
+    #[inline]
     pub fn potentially_visible_set(&self, leaf_id: usize) -> impl Iterator<Item = usize> + '_ {
         self.potential_set(leaf_id, |o| o.pvs)
     }
 
+    #[inline]
     pub fn potentially_hearable_set(&self, leaf_id: usize) -> impl Iterator<Item = usize> + '_ {
         self.potential_set(leaf_id, |o| o.phs)
     }
 
+    #[inline]
     pub fn leaf_at<C, I: Into<V3<C>>>(
         &self,
         root: Handle<'_, Self, Node>,
@@ -768,6 +865,7 @@ impl Vis {
         self.leaf_index_at(root, point).and_then(|i| self.leaf(i))
     }
 
+    #[inline]
     pub fn leaf_index_at<C, I: Into<V3<C>>>(
         &self,
         root: Handle<'_, Self, Node>,
@@ -801,6 +899,7 @@ impl Vis {
         }
     }
 
+    #[inline]
     pub fn leaves(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Leaf>> + Clone {
         self.leaves.iter().map(move |leaf| Handle {
             bsp: self,
@@ -808,6 +907,7 @@ impl Vis {
         })
     }
 
+    #[inline]
     pub fn cluster_at<C, I: Into<V3<C>>>(
         &self,
         root: Handle<'_, Self, Node>,
@@ -820,6 +920,7 @@ impl Vis {
             .and_then(|leaf| leaf.cluster.try_into().ok())
     }
 
+    #[inline]
     pub fn leaves_in_cluster(
         &self,
         cluster: impl TryInto<i16>,
@@ -858,12 +959,14 @@ impl Vis {
             })
     }
 
+    #[inline]
     pub fn clusters(&self) -> impl ExactSizeIterator<Item = u16> + Clone {
         0..self.visdata.cluster_offsets.len() as u16
     }
 
     /// We use `impl TryInto` so that `-1` is transparently converted to "no visible clusters",
     /// but if you know your cluster ID is valid then you can skip that check.
+    #[inline]
     pub fn visible_clusters<'a>(
         &'a self,
         from: u16,
@@ -884,111 +987,130 @@ impl Vis {
 }
 
 impl AsRef<[Texture]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Texture] {
         &self.textures
     }
 }
 
 impl AsRef<[LeafFace]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[LeafFace] {
         &self.leaf_faces
     }
 }
 
 impl AsRef<[LeafBrush]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[LeafBrush] {
         &self.leaf_brushes
     }
 }
 
 impl AsRef<[Edge]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Edge] {
         &self.edges
     }
 }
 
 impl AsRef<[SurfEdge]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[SurfEdge] {
         &self.surf_edges
     }
 }
 
 impl AsRef<[Brush]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Brush] {
         &self.brushes
     }
 }
 
 impl AsRef<[BrushSide]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[BrushSide] {
         &self.brush_sides
     }
 }
 
 impl AsRef<[QVec]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[QVec] {
         &self.vertices
     }
 }
 
 impl AsRef<[Face]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Face] {
         &self.faces
     }
 }
 
 impl AsRef<[Area]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Area] {
         &self.areas
     }
 }
 
 impl AsRef<[AreaPortal]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[AreaPortal] {
         &self.area_portals
     }
 }
 
 impl AsRef<[Model]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Model] {
         &self.vis.models
     }
 }
 
 impl AsRef<[Leaf]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Leaf] {
         self.vis.as_ref()
     }
 }
 
 impl AsRef<[Node]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Node] {
         self.vis.as_ref()
     }
 }
 
 impl AsRef<[Plane]> for Bsp {
+    #[inline]
     fn as_ref(&self) -> &[Plane] {
         self.vis.as_ref()
     }
 }
 
 impl Bsp {
-    pub fn read<R: Read + Seek>(mut reader: R) -> io::Result<Self> {
-        // TODO: Use this to decide on the version to parse it as
-        const EXPECTED_VERSION: u32 = 0x26;
+    #[inline]
+    pub fn read<R: Read + Seek>(reader: R) -> io::Result<Self> {
+        Self::read_with_format::<R, Quake2>(reader)
+    }
 
-        let header = SimpleParse::parse(&mut reader)?;
+    #[inline]
+    pub fn read_with_format<R: Read + Seek, T: BspFormat>(mut reader: R) -> io::Result<Self> {
+        let _magic = T::Magic::parse(&mut reader)?;
         let version = u32::parse(&mut reader)?;
 
-        if version != EXPECTED_VERSION {
+        if version != T::VERSION {
             return Err(error(format!(
                 "Invalid version (expected {:?}, got {:?})",
-                EXPECTED_VERSION, version
+                T::VERSION,
+                version
             )));
         }
 
-        let dir_entries = Directories::parse(&mut reader)?;
+        let dir_entries: Quake2Directories = T::Directories::parse(&mut reader)?.into();
 
         let mut reader = BspReader { inner: reader };
 
@@ -1014,7 +1136,6 @@ impl Bsp {
 
         Ok({
             Bsp {
-                header,
                 entities,
                 textures,
                 leaf_faces,
@@ -1039,6 +1160,7 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn node(&self, n: usize) -> Option<Handle<'_, Self, Node>> {
         self.vis.nodes.get(n).map(|node| Handle {
             bsp: self,
@@ -1046,10 +1168,12 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn root_node(&self) -> Option<Handle<'_, Self, Node>> {
         self.node(self.model(0)?.headnode as usize)
     }
 
+    #[inline]
     pub fn leaf(&self, n: usize) -> Option<Handle<'_, Self, Leaf>> {
         self.vis.leaves.get(n).map(|leaf| Handle {
             bsp: self,
@@ -1057,6 +1181,7 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn plane(&self, n: usize) -> Option<Handle<'_, Self, Plane>> {
         self.vis.planes.get(n).map(|plane| Handle {
             bsp: self,
@@ -1064,6 +1189,7 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn face(&self, n: usize) -> Option<Handle<'_, Self, Face>> {
         self.faces.get(n).map(|face| Handle {
             bsp: self,
@@ -1071,6 +1197,7 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn faces(&self) -> impl Iterator<Item = Handle<'_, Self, Face>> + '_ {
         self.faces.iter().map(move |face| Handle {
             bsp: self,
@@ -1078,6 +1205,7 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn texture(&self, n: usize) -> Option<Handle<'_, Self, Texture>> {
         self.textures.get(n).map(move |texture| Handle {
             bsp: self,
@@ -1085,10 +1213,12 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn textures(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Texture>> + Clone {
         self.textures.iter().map(move |m| Handle::new(self, m))
     }
 
+    #[inline]
     pub fn model(&self, i: usize) -> Option<Handle<'_, Self, Model>> {
         self.vis.models.get(i).map(|model| Handle {
             bsp: self,
@@ -1096,10 +1226,12 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn models(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Model>> + Clone {
         self.vis.models().map(move |m| Handle::new(self, m.data))
     }
 
+    #[inline]
     pub fn leaves(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Leaf>> + Clone {
         self.vis.leaves.iter().map(move |leaf| Handle {
             bsp: self,
@@ -1107,12 +1239,14 @@ impl Bsp {
         })
     }
 
+    #[inline]
     pub fn clusters(&self) -> impl ExactSizeIterator<Item = u16> + Clone {
         0..self.vis.visdata.cluster_offsets.len() as u16
     }
 }
 
 impl<'a> Handle<'a, Bsp, LeafFace> {
+    #[inline]
     pub fn face(self) -> Handle<'a, Bsp, Face> {
         self.bsp.face(self.face as usize).unwrap()
     }
@@ -1124,6 +1258,7 @@ pub struct BoundingSphere {
 }
 
 impl Model {
+    #[inline]
     pub fn bounding_sphere(&self) -> BoundingSphere {
         let center = [
             (self.mins.0[0] + self.maxs.0[0]) / 2.,
@@ -1146,6 +1281,7 @@ impl Model {
 }
 
 impl<'a> Handle<'a, Bsp, Model> {
+    #[inline]
     pub fn leaves(self) -> Option<impl Iterator<Item = Handle<'a, Bsp, Leaf>> + Clone + 'a> {
         use itertools::Either;
 
@@ -1174,6 +1310,7 @@ impl<'a> Handle<'a, Bsp, Model> {
         }))
     }
 
+    #[inline]
     pub fn faces(self) -> impl Iterator<Item = Handle<'a, Bsp, Face>> {
         let start = self.face as usize;
         let end = start + self.num_faces as usize;
@@ -1185,6 +1322,7 @@ impl<'a> Handle<'a, Bsp, Model> {
 }
 
 impl<'a> Handle<'a, Vis, Model> {
+    #[inline]
     pub fn cluster_at<C, I: Into<V3<C>>>(self, point: I) -> Option<u16>
     where
         C: CoordSystem,
@@ -1201,12 +1339,14 @@ impl<'a> Handle<'a, Vis, Model> {
 }
 
 impl<'a> Handle<'a, Bsp, Texture> {
+    #[inline]
     pub fn next_frame(self) -> Option<Self> {
         u32::try_from(self.next)
             .ok()
             .and_then(|next| self.bsp.texture(next as usize))
     }
 
+    #[inline]
     pub fn frames(self) -> impl Iterator<Item = Handle<'a, Bsp, Texture>> {
         let mut texture = Some(self);
         let this = self;
@@ -1223,14 +1363,17 @@ impl<'a> Handle<'a, Bsp, Texture> {
 }
 
 impl<'a> Handle<'a, Bsp, Face> {
+    #[inline]
     pub fn texture(self) -> Option<Handle<'a, Bsp, Texture>> {
         self.bsp.texture(self.texture as _)
     }
 
+    #[inline]
     pub fn textures(self) -> impl Iterator<Item = Handle<'a, Bsp, Texture>> {
         self.texture().into_iter().flat_map(|tex| tex.frames())
     }
 
+    #[inline]
     pub fn texture_uvs(self) -> Option<impl Iterator<Item = (f32, f32)> + 'a> {
         let texture = self.texture()?;
 
@@ -1242,6 +1385,7 @@ impl<'a> Handle<'a, Bsp, Face> {
         }))
     }
 
+    #[inline]
     pub fn lightmap_dimensions(self) -> Option<((f32, f32), (f32, f32), u32, u32)> {
         use std::f32;
 
@@ -1273,8 +1417,13 @@ impl<'a> Handle<'a, Bsp, Face> {
         ))
     }
 
+    #[inline]
     pub fn lightmaps(self) -> Option<impl ExactSizeIterator<Item = LightmapRef<'a>>> {
-        if self.texture()?.flags.contains(SurfaceFlags::NOLIGHTMAP) {
+        if self
+            .texture()?
+            .flags
+            .intersects(SurfaceFlags::NOLIGHTMAP | SurfaceFlags::SKY | SurfaceFlags::NODRAW)
+        {
             return None;
         }
 
@@ -1292,6 +1441,7 @@ impl<'a> Handle<'a, Bsp, Face> {
         }))
     }
 
+    #[inline]
     pub fn edges(self) -> impl ExactSizeIterator<Item = Edge> + Clone + 'a {
         let start = self.surf_edge as usize;
         let end = (self.surf_edge + self.num_surf_edges as u32) as usize;
@@ -1307,6 +1457,7 @@ impl<'a> Handle<'a, Bsp, Face> {
             })
     }
 
+    #[inline]
     fn vert_indices(self) -> impl ExactSizeIterator<Item = u16> + 'a {
         let start = self.surf_edge as usize;
         let end = (self.surf_edge + self.num_surf_edges as u32) as usize;
@@ -1322,6 +1473,7 @@ impl<'a> Handle<'a, Bsp, Face> {
             })
     }
 
+    #[inline]
     pub fn vertices(self) -> impl ExactSizeIterator<Item = &'a QVec> + 'a {
         self.vert_indices()
             .map(move |i| &self.bsp.vertices[i as usize])
@@ -1332,6 +1484,7 @@ impl<'a, T> Handle<'a, T, Node>
 where
     T: AsRef<[Plane]>,
 {
+    #[inline]
     pub fn plane(self) -> Option<Handle<'a, T, Plane>> {
         self.bsp
             .as_ref()
@@ -1344,6 +1497,7 @@ impl<'a, T> Handle<'a, T, Node>
 where
     T: AsRef<[Face]>,
 {
+    #[inline]
     pub fn face(self) -> Option<Handle<'a, T, Face>> {
         self.bsp
             .as_ref()
@@ -1353,6 +1507,7 @@ where
 }
 
 impl<'a> Handle<'a, Bsp, Leaf> {
+    #[inline]
     pub fn leaf_faces(self) -> impl ExactSizeIterator<Item = Handle<'a, Bsp, LeafFace>> + Clone {
         let start = self.leaf_face as usize;
         let end = start + self.num_leaf_faces as usize;
@@ -1365,6 +1520,7 @@ impl<'a> Handle<'a, Bsp, Leaf> {
             })
     }
 
+    #[inline]
     pub fn faces(self) -> impl Iterator<Item = Handle<'a, Bsp, Face>> {
         self.leaf_faces()
             .filter_map(move |leaf_face| self.bsp.face(leaf_face.face as usize))

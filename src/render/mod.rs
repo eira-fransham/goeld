@@ -1,4 +1,4 @@
-use crate::cache::{Atlas, BufferCache, Cache, CacheCommon};
+use crate::cache::{Atlas, BufferCache, CacheCommon};
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 
@@ -47,7 +47,7 @@ impl Camera {
     }
 
     pub fn matrix(&self) -> cgmath::Matrix4<f32> {
-        use cgmath::{Deg, Matrix3, Matrix4, Vector3};
+        use cgmath::{Matrix3, Matrix4};
 
         #[cfg_attr(rustfmt, rustfmt_skip)]
         const QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX: Matrix4<f32> = Matrix4::new(
@@ -84,7 +84,7 @@ pub struct RenderCache {
 impl RenderCache {
     fn new(device: &wgpu::Device) -> Self {
         let diffuse = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
+            label: Some("tex_diffuseatlas"),
             size: DIFFUSE_ATLAS_EXTENT,
             mip_level_count: 1,
             sample_count: 1,
@@ -93,7 +93,7 @@ impl RenderCache {
             usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::COPY_DST,
         });
         let lightmap = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
+            label: Some("tex_lightmapatlas"),
             size: LIGHTMAP_ATLAS_EXTENT,
             mip_level_count: 1,
             sample_count: 1,
@@ -331,12 +331,13 @@ impl Renderer {
         (image, depth): (&wgpu::TextureView, &wgpu::TextureView),
         queue: &wgpu::Queue,
         render: F,
+        label: Option<&str>,
     ) -> Option<wgpu::CommandBuffer>
     where
         F: FnOnce(RenderContext<'_>),
     {
         let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
 
         self.cache.update(device, &mut encoder);
 

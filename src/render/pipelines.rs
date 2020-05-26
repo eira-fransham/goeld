@@ -200,7 +200,7 @@ pub mod world {
 pub mod sky {
     use super::Pipeline;
 
-    pub fn build(device: &wgpu::Device) -> Pipeline {
+    pub fn build(_device: &wgpu::Device) -> Pipeline {
         todo!()
     }
 }

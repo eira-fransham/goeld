@@ -3,17 +3,24 @@ use crate::{
     loader::{Load, LoadAsset, Loader},
     render::{Render, RenderCache, RenderContext, Vertex},
 };
-use cgmath::{InnerSpace, Matrix};
+use cgmath::{InnerSpace, Matrix, Point3};
+use collision::{Aabb3, Frustum, Relation};
 use fnv::FnvHashMap as HashMap;
 use std::ops::Range;
 
 pub struct BspAsset(pub bsp::Bsp);
 
+#[derive(Debug, Clone, PartialEq)]
+struct ClusterMeta {
+    aabb: Aabb3<f32>,
+    index_range: Range<u32>,
+}
+
 pub struct World {
     vis: bsp::Vis,
     vert_offset: u64,
     // Key is `(model, cluster)`
-    cluster_ranges: Vec<Range<u32>>,
+    cluster_meta: Vec<ClusterMeta>,
     model_ranges: Vec<Range<u32>>,
 }
 
@@ -128,8 +135,8 @@ where
                                         use std::iter::once;
 
                                         once(0)
-                                            .chain(once(face_number))
                                             .chain(once(face_number + 1))
+                                            .chain(once(face_number))
                                     })
                                     .map(move |i| i as u32 + start)
                             }),
@@ -199,17 +206,31 @@ impl LoadAsset for BspAsset {
             }
         };
 
-        let (vert_offset, model_ranges, cluster_ranges) = {
+        let (vert_offset, model_ranges, cluster_meta) = {
             use std::convert::TryInto;
 
             let (leaf_vertices, mut model_indices) =
                 leaf_meshes(&bsp, &mut buf, &mut get_texture, lightmap);
-            let mut clusters = vec![vec![]; bsp.clusters().count()];
+            let mut clusters = vec![
+                (vec![], Point3::from([0f32; 3]), Point3::from([0f32; 3]));
+                bsp.clusters().count()
+            ];
 
-            if let Some((_, leaf_indices)) = model_indices.next() {
+            if let Some((model, leaf_indices)) = model_indices.next() {
+                let (model_mins, model_maxs) =
+                    (Point3::from(model.mins.0), Point3::from(model.maxs.0));
+
                 for (leaf, iterator) in leaf_indices {
                     if let Ok(c) = leaf.cluster.try_into() {
-                        clusters.get_mut::<usize>(c).unwrap().push(iterator);
+                        let (iterators, mins, maxs) = clusters.get_mut::<usize>(c).unwrap();
+                        iterators.push(iterator);
+
+                        mins.x = mins.x.min(model_mins.x);
+                        mins.y = mins.y.min(model_mins.y);
+                        mins.z = mins.z.min(model_mins.z);
+                        maxs.x = maxs.x.max(model_maxs.x);
+                        maxs.y = maxs.y.max(model_maxs.y);
+                        maxs.z = maxs.z.max(model_maxs.z);
                     }
                 }
             }
@@ -218,11 +239,19 @@ impl LoadAsset for BspAsset {
 
             let (base_model_range, cluster_ranges): (_, Result<Vec<_>, _>) = indices.append_many(
                 clusters
-                    .into_iter()
-                    .map(|iterators| iterators.into_iter().flat_map(|i| i)),
+                    .iter_mut()
+                    .map(|(iterators, _, _)| iterators.drain(..).flat_map(|i| i)),
             );
 
-            let cluster_ranges = cluster_ranges?;
+            let cluster_meta = cluster_ranges?
+                .into_iter()
+                .zip(
+                    clusters
+                        .into_iter()
+                        .map(|(_, mins, maxs)| Aabb3::new(mins, maxs)),
+                )
+                .map(|(index_range, aabb)| ClusterMeta { index_range, aabb })
+                .collect::<Vec<_>>();
 
             let mut model_ranges = Vec::with_capacity(bsp.vis.models.len());
 
@@ -246,13 +275,13 @@ impl LoadAsset for BspAsset {
                 model_ranges.push(range.start as u32..range.end as u32);
             }
 
-            (leaf_vertices.start, model_ranges, cluster_ranges)
+            (leaf_vertices.start, model_ranges, cluster_meta)
         };
 
         Ok(World {
             vis: bsp.vis,
             vert_offset,
-            cluster_ranges,
+            cluster_meta,
             model_ranges,
         })
     }
@@ -260,10 +289,10 @@ impl LoadAsset for BspAsset {
 
 pub struct WorldIndexIter<'a> {
     clusters: hack::ImplTraitHack<'a>,
-    cluster_ranges: &'a [Range<u32>],
+    cluster_meta: &'a [ClusterMeta],
     model_ranges: std::slice::Iter<'a, Range<u32>>,
     models: std::slice::Iter<'a, bsp::Model>,
-    clipper: Clipper,
+    clipper: Frustum<f32>,
 }
 
 impl Iterator for WorldIndexIter<'_> {
@@ -273,69 +302,34 @@ impl Iterator for WorldIndexIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let Self {
             clusters,
-            cluster_ranges,
-
+            cluster_meta,
             model_ranges,
             models,
             clipper,
         } = self;
-        let cluster_ranges = &*cluster_ranges;
+        let clipper = &*clipper;
+
         clusters
+            .filter_map(move |cluster| {
+                let meta = cluster_meta[cluster as usize].clone();
+
+                if clipper.contains(&meta.aabb) != Relation::Out {
+                    Some(meta.index_range)
+                } else {
+                    None
+                }
+            })
             .next()
-            .map(move |cluster| cluster_ranges[cluster as usize].clone())
             .or_else(move || loop {
                 let model = models.next()?;
                 let range = model_ranges.next()?;
-                let bsp::BoundingSphere {
-                    center,
-                    radius_squared,
-                } = model.bounding_sphere();
 
-                if clipper.check_sphere(center.0.into(), radius_squared.sqrt()) {
+                if clipper.contains(&Aabb3::new(model.mins.0.into(), model.maxs.0.into()))
+                    != Relation::Out
+                {
                     break Some(range.clone());
                 }
             })
-    }
-}
-
-struct Clipper {
-    planes: [cgmath::Vector4<f32>; 6],
-}
-
-impl Clipper {
-    #[inline]
-    pub fn new(matrix: cgmath::Matrix4<f32>) -> Self {
-        let planes = [
-            (matrix.row(3) + matrix.row(0)),
-            (matrix.row(3) - matrix.row(0)),
-            (matrix.row(3) - matrix.row(1)),
-            (matrix.row(3) + matrix.row(1)),
-            (matrix.row(3) + matrix.row(2)),
-            (matrix.row(3) - matrix.row(2)),
-        ];
-
-        Self {
-            planes: [
-                planes[0] * (1.0 / planes[0].truncate().magnitude()),
-                planes[1] * (1.0 / planes[1].truncate().magnitude()),
-                planes[2] * (1.0 / planes[2].truncate().magnitude()),
-                planes[3] * (1.0 / planes[3].truncate().magnitude()),
-                planes[4] * (1.0 / planes[4].truncate().magnitude()),
-                planes[5] * (1.0 / planes[5].truncate().magnitude()),
-            ],
-        }
-    }
-
-    /// Check if the given sphere is within the Frustum
-    #[inline]
-    pub fn check_sphere(&self, center: cgmath::Vector3<f32>, radius: f32) -> bool {
-        for plane in &self.planes {
-            if plane.truncate().dot(center) + plane.w <= -radius {
-                return false;
-            }
-        }
-
-        true
     }
 }
 
@@ -356,9 +350,9 @@ impl<'a> Render for &'a World {
     #[inline]
     fn indices(self, ctx: &RenderContext) -> (u64, Self::Indices) {
         let pos: [f32; 3] = ctx.camera.position.into();
-        let cluster_ranges: &'a [Range<u32>] = &self.cluster_ranges;
+        let cluster_meta = &self.cluster_meta;
         let vis = &self.vis;
-        let clipper = Clipper::new(ctx.camera.matrix());
+        let clipper = Frustum::<f32>::from_matrix4(ctx.camera.matrix()).unwrap();
 
         let cluster = vis
             .model(0)
@@ -373,7 +367,7 @@ impl<'a> Render for &'a World {
             self.vert_offset,
             WorldIndexIter {
                 clusters,
-                cluster_ranges,
+                cluster_meta,
                 models: self.vis.models[model_start_index..].iter(),
                 model_ranges: self.model_ranges[model_start_index..].iter(),
                 clipper,

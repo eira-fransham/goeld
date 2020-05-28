@@ -234,26 +234,52 @@ impl<'a> Entity<'a> {
 }
 
 bitflags! {
+    /// "Surface flags", as defined in Quake 2. It's possible to reuse any
+    /// Quake-specific flags for your own purposes if you prefer, but the
+    /// names and descriptions here correspond to how Quake 2 sees these flags.
+    ///
+    /// Specifically, `SKY`, `NODRAW`, `NOLIGHTMAP`, `POINTLIGHT` and `NODLIGHT`
+    /// are special and should be implemented in a renderer, and `ALPHASHADOW`
+    /// and `LIGHTFILTER` should be implemented in anything that wants to generate
+    /// lightmaps like `q3map -light`.
     #[derive(Default)]
     pub struct SurfaceFlags: u32 {
-        const NODAMAGE    = 0b0000_0000_0000_0000_0001; // Never give falling damage
-        const SLICK       = 0b0000_0000_0000_0000_0010; // Affects game physics
-        const SKY         = 0b0000_0000_0000_0000_0100; // Lighting from environment map
-        const LADDER      = 0b0000_0000_0000_0000_1000; // Climbable ladder
-        const NOIMPACT    = 0b0000_0000_0000_0001_0000; // Don't make missile explosions
-        const NOMARKS     = 0b0000_0000_0000_0010_0000; // Don't leave missile marks
-        const FLESH       = 0b0000_0000_0000_0100_0000; // Make flesh sounds and effects
-        const NODRAW      = 0b0000_0000_0000_1000_0000; // Don't generate a drawsurface at all
-        const HINT        = 0b0000_0000_0001_0000_0000; // Make a primary bsp splitter
-        const SKIP        = 0b0000_0000_0010_0000_0000; // Completely ignore, allowing non-closed brushes
-        const NOLIGHTMAP  = 0b0000_0000_0100_0000_0000; // Surface doesn't need a lightmap
-        const POINTLIGHT  = 0b0000_0000_1000_0000_0000; // Generate lighting info at vertices
-        const METALSTEPS  = 0b0000_0001_0000_0000_0000; // Clanking footsteps
-        const NOSTEPS     = 0b0000_0010_0000_0000_0000; // No footstep sounds
-        const NONSOLID    = 0b0000_0100_0000_0000_0000; // Don't collide against curves with this set
-        const LIGHTFILTER = 0b0000_1000_0000_0000_0000; // Act as a light filter during q3map -light
-        const ALPHASHADOW = 0b0001_0000_0000_0000_0000; // Do per-pixel light shadow casting in q3map
-        const NODLIGHT    = 0b0010_0000_0000_0000_0000; // Never add dynamic lights
+        /// Never give falling damage
+        const NODAMAGE    = 0b0000_0000_0000_0000_0001;
+        /// Affects game physics
+        const SLICK       = 0b0000_0000_0000_0000_0010;
+        /// Lighting from environment map
+        const SKY         = 0b0000_0000_0000_0000_0100;
+        /// Climbable ladder
+        const LADDER      = 0b0000_0000_0000_0000_1000;
+        /// Don't make missile explosions
+        const NOIMPACT    = 0b0000_0000_0000_0001_0000;
+        /// Don't leave missile marks
+        const NOMARKS     = 0b0000_0000_0000_0010_0000;
+        /// Make flesh sounds and effects
+        const FLESH       = 0b0000_0000_0000_0100_0000;
+        /// Don't generate a drawsurface at all
+        const NODRAW      = 0b0000_0000_0000_1000_0000;
+        /// Make a primary bsp splitter
+        const HINT        = 0b0000_0000_0001_0000_0000;
+        /// Completely ignore, allowing non-closed brushes
+        const SKIP        = 0b0000_0000_0010_0000_0000;
+        /// Surface doesn't need a lightmap
+        const NOLIGHTMAP  = 0b0000_0000_0100_0000_0000;
+        /// Generate lighting info at vertices
+        const POINTLIGHT  = 0b0000_0000_1000_0000_0000;
+        /// Clanking footsteps
+        const METALSTEPS  = 0b0000_0001_0000_0000_0000;
+        /// No footstep sounds
+        const NOSTEPS     = 0b0000_0010_0000_0000_0000;
+        /// Don't collide against curves with this set
+        const NONSOLID    = 0b0000_0100_0000_0000_0000;
+        /// Act as a light filter during q3map -light
+        const LIGHTFILTER = 0b0000_1000_0000_0000_0000;
+        /// Do per-pixel light shadow casting in q3map
+        const ALPHASHADOW = 0b0001_0000_0000_0000_0000;
+        /// Never add dynamic lights
+        const NODLIGHT    = 0b0010_0000_0000_0000_0000;
     }
 }
 
@@ -559,8 +585,6 @@ impl<R: Read + Seek> BspReader<R> {
                     ))
                 })??;
 
-                cluster_bytes -= 1;
-
                 if byte == 0 {
                     let count = bytes
                         .next()
@@ -571,6 +595,8 @@ impl<R: Read + Seek> BspReader<R> {
 
                     vecs.extend(iter::repeat(0).take(count));
                 } else {
+                    cluster_bytes -= 1;
+
                     vecs.push(byte);
                 }
             }
@@ -589,8 +615,6 @@ impl<R: Read + Seek> BspReader<R> {
                     ))
                 })??;
 
-                cluster_bytes -= 1;
-
                 if byte == 0 {
                     let count = bytes
                         .next()
@@ -601,6 +625,8 @@ impl<R: Read + Seek> BspReader<R> {
 
                     vecs.extend(iter::repeat(0).take(count));
                 } else {
+                    cluster_bytes -= 1;
+
                     vecs.push(byte);
                 }
             }

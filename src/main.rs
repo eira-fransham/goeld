@@ -1,5 +1,7 @@
 #![feature(osstring_ascii, const_generics, type_alias_impl_trait)]
 
+extern crate open_asset_importer as assimp;
+
 use bsp::Bsp;
 
 use fnv::FnvHashSet as HashSet;
@@ -12,7 +14,7 @@ use winit::{
 };
 
 #[global_allocator]
-#[cfg(feature = "jeamllocator")]
+#[cfg(feature = "jemallocator")]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 mod assets;
@@ -52,7 +54,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device, 1.4, 1.4);
+    let mut renderer = Renderer::init(&device, 1.6, 1.4);
     let mut sky = None;
     let mut camera = None;
 

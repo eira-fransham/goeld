@@ -345,7 +345,7 @@ impl Renderer {
         if let (Some(vertices), Some(indices)) = (&*self.cache.vertices, &*self.cache.indices) {
             let matrix = camera.matrix();
             let matrix: &[f32; 16] = matrix.as_ref();
-            queue.write_buffer(bytemuck::cast_slice(matrix), &self.matrix, 0);
+            queue.write_buffer(&self.matrix, 0, bytemuck::cast_slice(matrix));
 
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {

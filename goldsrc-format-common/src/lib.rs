@@ -2,10 +2,7 @@
 
 use arrayvec::{Array, ArrayString, ArrayVec};
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::{
-    io::{self, Error, ErrorKind},
-    iter, num,
-};
+use std::{io, iter, num};
 
 #[cfg(not(debug_assertions))]
 fn error(msg: impl ToString) -> io::Error {

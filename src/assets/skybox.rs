@@ -99,7 +99,7 @@ impl LoadAsset for &'_ SkyboxAsset<'_> {
         let vert_offset = cache.vertices.append(cube_verts).start;
         let indices = (0..6)
             .flat_map(|face| {
-                [0, 1, 2, 2, 3, 0]
+                [0, 2, 1, 3, 2, 0]
                     .iter()
                     .map(move |&i| i + face * face_verts.len())
             })

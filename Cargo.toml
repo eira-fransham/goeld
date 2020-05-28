@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 bsp = { path = "./bsp" }
-goldsrc-mdl = { path = "./goldsrc-mdl/" }
+collision = "0.20"
 wgpu = { git = "https://github.com/gfx-rs/wgpu-rs" }
 winit = "0.22"
 futures = "0.3"
@@ -20,6 +20,7 @@ rect_packer = "0.2"
 image = "0.23"
 memoffset = "0.5"
 anyhow = "1"
+open-asset-importer = "0.1.1"
 jemallocator = { version = "0.3", optional = true }
 
 [features]

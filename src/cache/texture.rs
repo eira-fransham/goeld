@@ -161,14 +161,15 @@ impl CacheCommon for Atlas {
                 encoder.copy_buffer_to_texture(
                     wgpu::BufferCopyView {
                         buffer: &buffer,
-                        offset: offset,
-                        bytes_per_row: 4 * rect.width as u32,
-                        rows_per_image: rect.height as u32,
+                        layout: wgpu::TextureDataLayout {
+                            offset: offset,
+                            bytes_per_row: 4 * rect.width as u32,
+                            rows_per_image: rect.height as u32,
+                        },
                     },
                     wgpu::TextureCopyView {
                         texture: &self.texture,
                         mip_level: 0,
-                        array_layer: 0,
                         origin: wgpu::Origin3d {
                             x: rect.x as u32,
                             y: rect.y as u32,

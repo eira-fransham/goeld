@@ -23,14 +23,11 @@ anyhow = "1"
 open-asset-importer = "0.1.1"
 jemallocator = { version = "0.3", optional = true }
 
+[build-dependencies]
+shaderc = "0.6"
+
 [features]
 default = ["jemallocator"]
 
 [workspace]
 members = ["bsp", "goldsrc-mdl", "goldsrc-format-common"]
-
-[profile.release]
-codegen-units = 1
-
-[profile.dev]
-opt-level = 1

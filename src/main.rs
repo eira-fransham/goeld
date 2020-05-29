@@ -5,8 +5,7 @@ extern crate open_asset_importer as assimp;
 use bsp::Bsp;
 
 use fnv::FnvHashSet as HashSet;
-use std::time;
-use wgpu;
+use std::{iter, time};
 use winit::{
     event::{self, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -22,7 +21,7 @@ mod cache;
 mod loader;
 mod render;
 
-use assets::{BspAsset, SkyboxAsset};
+use assets::{BspAsset, MdlAsset, SkyboxAsset};
 use loader::{Load, LoadAsset, Loader};
 use render::{Camera, DoRender, Renderer};
 
@@ -54,9 +53,11 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device, 1.6, 1.4);
+    let mut renderer = Renderer::init(&device, size.into(), 1.6, 1.4);
     let mut sky = None;
     let mut camera = None;
+
+    renderer.set_msaa_factor(2);
 
     'find_special_entities: for entity in bsp.entities.iter() {
         let mut is_player_start = false;
@@ -123,9 +124,21 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         None
     };
 
+    let mut model_importer = assimp::Importer::new();
+
+    model_importer.join_identical_vertices(true);
+    model_importer.optimize_meshes(true);
+    model_importer.optimize_graph(|opt| {
+        opt.enable = true;
+    });
+    model_importer.debone(|opt| {
+        opt.enable = true;
+    });
+    model_importer.triangulate(true);
+
     let mut camera = camera.unwrap_or(Camera::new(cgmath::Deg(70.), size.width, size.height));
 
-    let bsp = BspAsset(bsp).load(&loader, renderer.cache_mut()).unwrap();
+    let mut bsp = BspAsset(bsp).load(&loader, renderer.cache_mut()).unwrap();
 
     let mut sc_desc = wgpu::SwapChainDescriptor {
         usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
@@ -134,24 +147,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         height: size.height,
         present_mode: wgpu::PresentMode::Mailbox,
     };
-
-    let mut depth_texture_desc = wgpu::TextureDescriptor {
-        size: wgpu::Extent3d {
-            width: size.width,
-            height: size.height,
-            depth: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 4,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
-        label: Some("tex_depth"),
-    };
-
-    let mut depth_texture = device.create_texture(&depth_texture_desc);
-
-    let mut depth_texture_view = depth_texture.create_default_view();
 
     let mut swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
@@ -243,10 +238,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                 camera.set_aspect_ratio(sc_desc.width, sc_desc.height);
 
-                depth_texture_desc.size.width = size.width;
-                depth_texture_desc.size.height = size.height;
-                depth_texture = device.create_texture(&depth_texture_desc);
-                depth_texture_view = depth_texture.create_default_view();
+                renderer.set_size(size.into());
             }
 
             Event::WindowEvent { event, .. } => match event {
@@ -329,40 +321,14 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     .get_next_texture()
                     .expect("Timeout when acquiring next swap chain texture");
 
-                let sky_buf = sky.as_ref().and_then(|sky| {
-                    let mut sky_cam = camera.clone();
-                    sky_cam.position = cgmath::Vector3 {
-                        x: 0.,
-                        y: 0.,
-                        z: 0.,
-                    };
-
-                    renderer.render(
-                        &device,
-                        &sky_cam,
-                        (&frame.view, &depth_texture_view),
-                        &queue,
-                        |mut ctx| {
-                            ctx.render(sky);
-                        },
-                        Some("render_skybox"),
-                    )
-                });
-
-                queue.submit(sky_buf);
-
-                let command_buf = renderer.render(
-                    &device,
-                    &camera,
-                    (&frame.view, &depth_texture_view),
-                    &queue,
-                    |mut ctx| {
-                        ctx.render(&bsp);
-                    },
-                    Some("render_world"),
-                );
-
-                queue.submit(command_buf);
+                for commands in renderer.render(&device, &camera, &frame.view, &queue, |mut ctx| {
+                    if let Some(sky) = &sky {
+                        ctx.render(sky);
+                    }
+                    ctx.render(&mut bsp);
+                }) {
+                    queue.submit(iter::once(commands));
+                }
             }
             _ => {}
         }

@@ -1,7 +1,7 @@
 use crate::{
     cache::Cache,
     loader::{Load, LoadAsset, Loader},
-    render::{Render, RenderCache, RenderContext, Vertex},
+    render::{PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex},
 };
 use rect_packer::Rect;
 use std::{borrow::Cow, iter, ops::Range, path::Path};
@@ -81,22 +81,17 @@ impl LoadAsset for &'_ SkyboxAsset<'_> {
             let tex_w = rect.width as f32;
             let tex_h = rect.height as f32;
 
-            Vertex {
-                pos: [pos[0] * 2., pos[1] * 2., pos[2] * 2., 1.],
-                tex: [rect.x as f32, rect.y as f32, tex_w, tex_h],
+            TexturedVertex {
+                pos: [pos[0], pos[1], pos[2], 0.5],
                 tex_coord: [
                     // We do `(x + 1) / 2` to convert from `-1..1` to `0..1`
-                    (((coord[0] + 1.) / 2.) * tex_w).round(),
-                    ((1. - (coord[1] + 1.) / 2.) * tex_h).round(),
+                    rect.x as f32 + (((coord[0] + 1.) / 2.) * tex_w).round(),
+                    rect.y as f32 + ((1. - (coord[1] + 1.) / 2.) * tex_h).round(),
                 ],
-                value: 1.0,
-                lightmap_coord: [0., 0.],
-                lightmap_width: 0.,
-                lightmap_count: 0,
             }
         });
 
-        let vert_offset = cache.vertices.append(cube_verts).start;
+        let vert_offset = cache.textured_vertices.append(cube_verts).start;
         let indices = (0..6)
             .flat_map(|face| {
                 [0, 2, 1, 3, 2, 0]
@@ -116,8 +111,12 @@ impl LoadAsset for &'_ SkyboxAsset<'_> {
 
 impl<'a> Render for &'a Skybox {
     type Indices = iter::Once<Range<u32>>;
+    const PIPELINE: PipelineDesc = PipelineDesc::Skybox;
 
-    fn indices(self, _ctx: &RenderContext<'_>) -> (u64, Self::Indices) {
-        (self.vert_offset, iter::once(self.index_range.clone()))
+    fn indices(self, _ctx: &RenderContext<'_>) -> RenderMesh<Self::Indices> {
+        RenderMesh {
+            offsets: (Some(self.vert_offset.into()), None),
+            indices: iter::once(self.index_range.clone()),
+        }
     }
 }

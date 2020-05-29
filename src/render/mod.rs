@@ -1,6 +1,6 @@
 use crate::cache::{Atlas, BufferCache, CacheCommon};
 use bytemuck::{Pod, Zeroable};
-use std::ops::Range;
+use std::{iter, mem, num::NonZeroU8, ops::Range};
 
 mod pipelines;
 
@@ -46,8 +46,13 @@ impl Camera {
         self.aspect_ratio = width as f32 / height as f32;
     }
 
-    pub fn matrix(&self) -> cgmath::Matrix4<f32> {
-        use cgmath::{Matrix3, Matrix4};
+    pub fn translation(&self) -> cgmath::Matrix4<f32> {
+        use cgmath::Matrix4;
+        Matrix4::from_translation(-self.position)
+    }
+
+    pub fn projection(&self) -> cgmath::Matrix4<f32> {
+        use cgmath::Matrix4;
 
         #[cfg_attr(rustfmt, rustfmt_skip)]
         const QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX: Matrix4<f32> = Matrix4::new(
@@ -57,19 +62,15 @@ impl Camera {
             0.0, 0.0,  0.0, 1.0,
         );
 
-        let quake_to_opengl_matrix = Matrix3::from_cols(
-            QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX.x.truncate(),
-            QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX.y.truncate(),
-            QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX.z.truncate(),
-        );
-
+        let view = QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX
+            * Matrix4::from_angle_y(-self.pitch)
+            * Matrix4::from_angle_z(-self.yaw);
         let projection = cgmath::perspective(self.vertical_fov, self.aspect_ratio, 1., 4096.);
-        let view = Matrix4::from_angle_x(self.pitch)
-            * Matrix4::from_angle_y(-self.yaw)
-            * Matrix4::from_translation(-quake_to_opengl_matrix * self.position)
-            * QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX;
-
         OPENGL_TO_WGPU_MATRIX * projection * view
+    }
+
+    pub fn matrix(&self) -> cgmath::Matrix4<f32> {
+        self.projection() * self.translation()
     }
 }
 
@@ -77,7 +78,8 @@ pub struct RenderCache {
     pub diffuse: Atlas,
     pub lightmap: Atlas,
 
-    pub vertices: BufferCache<Vertex>,
+    pub textured_vertices: BufferCache<TexturedVertex>,
+    pub world_vertices: BufferCache<WorldVertex>,
     pub indices: BufferCache<u32>,
 }
 
@@ -116,7 +118,8 @@ impl RenderCache {
                 1,
             ),
 
-            vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
+            textured_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
+            world_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
             indices: BufferCache::new(wgpu::BufferUsage::INDEX),
         }
     }
@@ -124,15 +127,63 @@ impl RenderCache {
     fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
         self.diffuse.update(device, encoder);
         self.lightmap.update(device, encoder);
-        self.vertices.update(device, encoder);
+        self.textured_vertices.update(device, encoder);
+        self.world_vertices.update(device, encoder);
         self.indices.update(device, encoder);
     }
 }
 
+pub struct VertexOffset<T> {
+    pub id: u64,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Clone for VertexOffset<T> {
+    fn clone(&self) -> Self {
+        self.id.into()
+    }
+}
+
+impl<T> Copy for VertexOffset<T> {}
+
+impl<T> Default for VertexOffset<T> {
+    fn default() -> Self {
+        Self {
+            id: Default::default(),
+            _marker: Default::default(),
+        }
+    }
+}
+
+impl<T> From<u64> for VertexOffset<T> {
+    fn from(other: u64) -> Self {
+        Self {
+            id: other,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RenderMesh<I> {
+    pub offsets: (
+        Option<VertexOffset<TexturedVertex>>,
+        Option<VertexOffset<WorldVertex>>,
+    ),
+    pub indices: I,
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum PipelineDesc {
+    Skybox,
+    World,
+}
+
 pub trait Render {
     type Indices: Iterator<Item = Range<u32>>;
+    const PIPELINE: PipelineDesc;
 
-    fn indices(self, ctx: &RenderContext<'_>) -> (u64, Self::Indices);
+    fn indices(self, ctx: &RenderContext<'_>) -> RenderMesh<Self::Indices>;
 }
 
 pub trait DoRender {
@@ -143,10 +194,18 @@ pub trait DoRender {
 
 pub struct Renderer {
     cache: RenderCache,
-
-    matrix: wgpu::Buffer,
-    atlas_sizes: wgpu::Buffer,
-    pipeline: Pipeline,
+    matrices: wgpu::Buffer,
+    fragment_uniforms: wgpu::Buffer,
+    out_size: (u32, u32),
+    nearest_sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
+    world_pipeline: Pipeline,
+    skybox_pipeline: Pipeline,
+    post_pipeline: Option<Pipeline>,
+    msaa_factor: NonZeroU8,
+    msaa_buffer: Option<(NonZeroU8, wgpu::TextureView)>,
+    msaa_verts: wgpu::Buffer,
+    depth_buffer: Option<wgpu::TextureView>,
 }
 
 // TODO: Do this better somehow
@@ -173,22 +232,30 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 );
 
 #[derive(Debug, Clone, Copy)]
-pub struct Vertex {
+pub struct TexturedVertex {
     pub pos: [f32; 4],
-    pub tex: [f32; 4],
+    /// For world vertices, this starts at zero and must be added to `WorldVertex::atlas_texture.xy`,
+    /// for vertices of textures which don't have wrapping implemented in a shader (models and
+    /// skyboxes) this is the absolute coord. We might change this to be consistent in the future,
+    /// especially if we want to support wrapping everywhere.
     pub tex_coord: [f32; 2],
-    pub value: f32,
-    // TODO: Can we split these into a separate vertex to save space?
-    //       Not all vertices need it (unlike `tex_coord`).
-    //       `tex` is also unnecessary for skybox faces and faces whose textures
-    //       do not repeat (maybe true for models?).
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WorldVertex {
+    /// The coordinates and size of the texture in the atlas, so we can do wrapping
+    /// in the shader while still using our fake megatexture thing.
+    pub atlas_texture: [f32; 4],
     pub lightmap_coord: [f32; 2],
     pub lightmap_width: f32,
     pub lightmap_count: u32,
+    pub value: f32,
 }
 
-unsafe impl Pod for Vertex {}
-unsafe impl Zeroable for Vertex {}
+unsafe impl Pod for TexturedVertex {}
+unsafe impl Zeroable for TexturedVertex {}
+unsafe impl Pod for WorldVertex {}
+unsafe impl Zeroable for WorldVertex {}
 
 /// Get the vertices per-cluster. First element is the vertices for cluster 0, then for cluster 1, and so
 /// forth.
@@ -197,6 +264,7 @@ unsafe impl Zeroable for Vertex {}
 pub struct RenderContext<'a> {
     pub renderer: &'a Renderer,
     pub camera: &'a Camera,
+    cur_pipeline: Option<PipelineDesc>,
     rpass: wgpu::RenderPass<'a>,
 }
 
@@ -205,8 +273,6 @@ impl DoRender for RenderContext<'_> {
     where
         T: Render,
     {
-        use std::convert::TryInto;
-
         // Yeah I know this is weird but it's basically free and it makes the output way
         // easier to debug in renderdoc
         struct MergeRanges<I> {
@@ -236,26 +302,70 @@ impl DoRender for RenderContext<'_> {
             }
         }
 
-        let (offset, ranges) = to_render.indices(&self);
+        let RenderMesh {
+            offsets: (tex_o, world_o),
+            indices,
+        } = to_render.indices(&self);
         let ranges = MergeRanges {
-            ranges: ranges.peekable(),
+            ranges: indices.peekable(),
         };
 
+        if self.cur_pipeline != Some(T::PIPELINE) {
+            self.cur_pipeline = Some(T::PIPELINE);
+
+            let pipeline = match T::PIPELINE {
+                PipelineDesc::Skybox => &self.renderer.skybox_pipeline,
+                PipelineDesc::World => &self.renderer.world_pipeline,
+            };
+
+            self.rpass.set_pipeline(&pipeline.pipeline);
+            self.rpass.set_bind_group(0, &pipeline.bind_group, &[]);
+        }
+
+        if let Some(verts) = &*self.renderer.cache().textured_vertices {
+            self.rpass.set_vertex_buffer(
+                0,
+                verts.slice(tex_o.unwrap().id * mem::size_of::<TexturedVertex>() as u64..),
+            );
+        } else {
+            return;
+        }
+
+        if let Some(world_o) = world_o {
+            if let Some(verts) = &*self.renderer.cache().world_vertices {
+                self.rpass.set_vertex_buffer(
+                    1,
+                    verts.slice(world_o.id * mem::size_of::<WorldVertex>() as u64..),
+                );
+            } else {
+                return;
+            }
+        }
+
         for range in ranges {
-            self.rpass
-                .draw_indexed(range, offset.try_into().unwrap(), 0..1);
+            self.rpass.draw_indexed(range, 0, 0..1);
         }
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct Matrices {
+    view: cgmath::Matrix4<f32>,
+    projection: cgmath::Matrix4<f32>,
+}
+
+unsafe impl Pod for Matrices {}
+unsafe impl Zeroable for Matrices {}
+
 impl Renderer {
-    pub fn init(device: &wgpu::Device, gamma: f32, intensity: f32) -> Self {
+    pub fn init(device: &wgpu::Device, out_size: (u32, u32), gamma: f32, intensity: f32) -> Self {
         let cache = RenderCache::new(device);
 
         let diffuse_atlas_view = cache.diffuse.texture_view();
         let lightmap_atlas_view = cache.lightmap.texture_view();
 
-        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("sampler_diffuse"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -268,8 +378,8 @@ impl Renderer {
             compare: wgpu::CompareFunction::Undefined,
         });
 
-        let lightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("sampler_lightmap"),
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sampler_diffuse_blurred"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -281,13 +391,13 @@ impl Renderer {
             compare: wgpu::CompareFunction::Undefined,
         });
 
-        let matrix = device.create_buffer(&wgpu::BufferDescriptor {
+        let matrices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mat4_viewmatrix"),
-            size: std::mem::size_of::<[f32; 16]>() as u64,
+            size: std::mem::size_of::<Matrices>() as u64,
             usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
         });
 
-        let atlas_sizes = device.create_buffer_with_data(
+        let fragment_uniforms = device.create_buffer_with_data(
             bytemuck::cast_slice(&[
                 cache.diffuse.width() as f32,
                 cache.diffuse.height() as f32,
@@ -299,22 +409,162 @@ impl Renderer {
             wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
         );
 
-        // Create pipeline layout
-        let pipeline = self::pipelines::world::build(
+        let world_pipeline = self::pipelines::world::build(
             device,
             &diffuse_atlas_view,
             &lightmap_atlas_view,
-            &diffuse_sampler,
-            &lightmap_sampler,
-            &matrix,
-            &atlas_sizes,
+            &nearest_sampler,
+            &linear_sampler,
+            &matrices,
+            &fragment_uniforms,
+            1,
+        );
+
+        let skybox_pipeline = self::pipelines::sky::build(
+            device,
+            &diffuse_atlas_view,
+            &linear_sampler,
+            &matrices,
+            &fragment_uniforms,
+            1,
+        );
+
+        let msaa_verts = device.create_buffer_with_data(
+            bytemuck::cast_slice(&[
+                TexturedVertex {
+                    pos: [-1., -1., 0., 1.],
+                    tex_coord: [0., 1.],
+                },
+                TexturedVertex {
+                    pos: [1., -1., 0., 1.],
+                    tex_coord: [1., 1.],
+                },
+                TexturedVertex {
+                    pos: [1., 1., 0., 1.],
+                    tex_coord: [1., 0.],
+                },
+                TexturedVertex {
+                    pos: [1., 1., 0., 1.],
+                    tex_coord: [1., 0.],
+                },
+                TexturedVertex {
+                    pos: [-1., 1., 0., 1.],
+                    tex_coord: [0., 0.],
+                },
+                TexturedVertex {
+                    pos: [-1., -1., 0., 1.],
+                    tex_coord: [0., 1.],
+                },
+            ]),
+            wgpu::BufferUsage::VERTEX,
         );
 
         Self {
-            matrix,
-            atlas_sizes,
-            pipeline,
+            out_size,
+            matrices,
+            fragment_uniforms,
+            world_pipeline,
+            skybox_pipeline,
+            post_pipeline: None,
+            nearest_sampler,
+            linear_sampler,
             cache,
+            msaa_factor: NonZeroU8::new(1).unwrap(),
+            msaa_buffer: None,
+            msaa_verts,
+            depth_buffer: None,
+        }
+    }
+
+    pub fn set_size(&mut self, size: (u32, u32)) {
+        self.out_size = size;
+        self.msaa_buffer = None;
+        self.depth_buffer = None;
+    }
+
+    pub fn set_msaa_factor(&mut self, factor: u8) {
+        self.msaa_factor = NonZeroU8::new(factor).unwrap();
+        if self
+            .msaa_buffer
+            .as_ref()
+            .map(|(factor, _)| factor)
+            .unwrap_or(&NonZeroU8::new(1).unwrap())
+            != &self.msaa_factor
+        {
+            self.msaa_buffer = None;
+        }
+    }
+
+    fn make_depth_tex(&self, device: &wgpu::Device) -> wgpu::TextureView {
+        let depth_texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: self.out_size.0,
+                height: self.out_size.1,
+                depth: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 4,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
+            label: Some("tex_depth"),
+        };
+
+        let depth_texture = device.create_texture(&depth_texture_desc);
+
+        depth_texture.create_default_view()
+    }
+
+    fn update_msaa_buffer(&mut self, device: &wgpu::Device) {
+        if self.msaa_buffer.as_ref().map(|(factor, _)| factor) != Some(&self.msaa_factor) {
+            let (width, height) = self.out_size;
+
+            let buffer = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("msaa_buffer"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.msaa_factor.get() as u32,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
+            });
+
+            self.msaa_buffer = Some((self.msaa_factor, buffer.create_default_view()));
+
+            let diffuse_atlas_view = self.cache.diffuse.texture_view();
+            let lightmap_atlas_view = self.cache.lightmap.texture_view();
+
+            self.world_pipeline = self::pipelines::world::build(
+                device,
+                &diffuse_atlas_view,
+                &lightmap_atlas_view,
+                &self.nearest_sampler,
+                &self.linear_sampler,
+                &self.matrices,
+                &self.fragment_uniforms,
+                self.msaa_factor.get() as u32,
+            );
+
+            self.skybox_pipeline = self::pipelines::sky::build(
+                device,
+                &diffuse_atlas_view,
+                &self.linear_sampler,
+                &self.matrices,
+                &self.fragment_uniforms,
+                self.msaa_factor.get() as u32,
+            );
+
+            self.post_pipeline = Some(self::pipelines::postprocess::build(
+                device,
+                self.msaa_buffer.as_ref().map(|(_, buf)| buf).unwrap(),
+                &self.linear_sampler,
+                &self.fragment_uniforms,
+                self.msaa_factor.get() as u32,
+            ));
         }
     }
 
@@ -330,24 +580,84 @@ impl Renderer {
         &mut self,
         device: &wgpu::Device,
         camera: &Camera,
-        (image, depth): (&wgpu::TextureView, &wgpu::TextureView),
+        image: &wgpu::TextureView,
         queue: &wgpu::Queue,
         render: F,
-        label: Option<&str>,
-    ) -> Option<wgpu::CommandBuffer>
+    ) -> impl Iterator<Item = wgpu::CommandBuffer>
     where
         F: FnOnce(RenderContext<'_>),
     {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
+        self.update_msaa_buffer(&*device);
 
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render"),
+        });
         self.cache.update(device, &mut encoder);
 
-        if let (Some(vertices), Some(indices)) = (&*self.cache.vertices, &*self.cache.indices) {
-            let matrix = camera.matrix();
-            let matrix: &[f32; 16] = matrix.as_ref();
-            queue.write_buffer(&self.matrix, 0, bytemuck::cast_slice(matrix));
+        let indices = if let Some(i) = self.cache.indices.as_ref() {
+            i
+        } else {
+            return None.into_iter().flatten();
+        };
 
+        let view = camera.translation();
+        let projection = camera.projection();
+        queue.write_buffer(
+            &self.matrices,
+            0,
+            bytemuck::cast_slice(&[Matrices { view, projection }]),
+        );
+
+        let depth = if let Some(depth) = &self.depth_buffer {
+            depth
+        } else {
+            self.depth_buffer = Some(self.make_depth_tex(device));
+            self.depth_buffer.as_ref().unwrap()
+        };
+
+        {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+                    attachment: self.msaa_buffer.as_ref().map(|(_, buf)| buf).unwrap(),
+                    resolve_target: None,
+                    load_op: wgpu::LoadOp::Load,
+                    store_op: wgpu::StoreOp::Store,
+                    clear_color: wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                }],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachmentDescriptor {
+                    attachment: &depth,
+                    depth_load_op: wgpu::LoadOp::Clear,
+                    depth_store_op: wgpu::StoreOp::Store,
+                    stencil_load_op: wgpu::LoadOp::Clear,
+                    stencil_store_op: wgpu::StoreOp::Store,
+                    clear_depth: 1.0,
+                    clear_stencil: 0,
+                }),
+            });
+
+            rpass.set_index_buffer(indices.slice(..));
+
+            render(RenderContext {
+                renderer: self,
+                camera,
+                rpass,
+                cur_pipeline: None,
+            });
+        }
+
+        let render = encoder.finish();
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("post"),
+        });
+
+        {
+            let mut post_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
                     attachment: image,
                     resolve_target: None,
@@ -360,29 +670,17 @@ impl Renderer {
                         a: 1.0,
                     },
                 }],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachmentDescriptor {
-                    attachment: depth,
-                    depth_load_op: wgpu::LoadOp::Clear,
-                    depth_store_op: wgpu::StoreOp::Store,
-                    stencil_load_op: wgpu::LoadOp::Clear,
-                    stencil_store_op: wgpu::StoreOp::Store,
-                    clear_depth: 1.0,
-                    clear_stencil: 0,
-                }),
+                depth_stencil_attachment: None,
             });
 
-            rpass.set_pipeline(&self.pipeline.pipeline);
-            rpass.set_bind_group(0, &self.pipeline.bind_group, &[]);
-            rpass.set_vertex_buffer(0, vertices.slice(..));
-            rpass.set_index_buffer(indices.slice(..));
-
-            render(RenderContext {
-                renderer: self,
-                camera,
-                rpass,
-            })
+            post_pass.set_pipeline(&self.post_pipeline.as_ref().unwrap().pipeline);
+            post_pass.set_bind_group(0, &self.post_pipeline.as_ref().unwrap().bind_group, &[]);
+            post_pass.set_vertex_buffer(0, self.msaa_verts.slice(..));
+            post_pass.draw(0..6, 0..1);
         }
 
-        Some(encoder.finish())
+        Some(iter::once(render).chain(iter::once(encoder.finish())))
+            .into_iter()
+            .flatten()
     }
 }

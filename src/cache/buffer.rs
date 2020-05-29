@@ -61,6 +61,7 @@ where
     type Key = Range<u64>;
 
     // TODO: Reuse the same buffer for transferring the data to the GPU, we don't need a new one every time.
+    //       Really, this should be something like a `Vec` where it automatically resizes to a power of two.
     fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
         if !self.unwritten.is_empty() {
             if let Some(buffer) = &self.buffer {

@@ -1,7 +1,9 @@
 use crate::{
     cache::{Atlas, Cache},
     loader::{Load, LoadAsset, Loader},
-    render::{Render, RenderCache, RenderContext, Vertex},
+    render::{
+        PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex, WorldVertex,
+    },
 };
 use cgmath::{InnerSpace, Matrix, Point3};
 use collision::{Aabb3, Frustum, Relation};
@@ -18,7 +20,9 @@ struct ClusterMeta {
 
 pub struct World {
     vis: bsp::Vis,
-    vert_offset: u64,
+    last_cluster: Option<u16>,
+    tex_vert_offset: u64,
+    world_vert_offset: u64,
     // Key is `(model, cluster)`
     cluster_meta: Vec<ClusterMeta>,
     model_ranges: Vec<Range<u32>>,
@@ -31,7 +35,8 @@ fn leaf_meshes<'a, F>(
     mut get_texture: F,
     lightmap_cache: &mut Atlas,
 ) -> (
-    Vec<Vertex>,
+    Vec<TexturedVertex>,
+    Vec<WorldVertex>,
     impl ExactSizeIterator<
             Item = (
                 &'a bsp::Model,
@@ -47,10 +52,12 @@ where
 {
     // We'll probably need to reallocate a few times since vertices are reused,
     // but this is a reasonable lower bound
-    let mut vertices = Vec::with_capacity(bsp.vertices.len());
+    let mut tex_vertices = Vec::with_capacity(bsp.vertices.len());
+    let mut world_vertices = Vec::with_capacity(bsp.vertices.len());
 
     for face in bsp.faces() {
-        face_start_indices.push(vertices.len() as u32);
+        debug_assert_eq!(tex_vertices.len(), world_vertices.len());
+        face_start_indices.push(tex_vertices.len() as u32);
 
         let texture = if let Some(texture) = face.texture() {
             texture
@@ -80,42 +87,49 @@ where
             (0, None)
         };
 
-        vertices.extend(face.vertices().map(|vert| {
+        for (tex_vert, world_vert) in face.vertices().map(|vert| {
             let (u, v) = (
                 vert.dot(&texture.axis_u) + texture.offset_u,
                 vert.dot(&texture.axis_v) + texture.offset_v,
             );
-
-            Vertex {
-                pos: [vert.x(), vert.y(), vert.z(), 1.],
-                tex: [
-                    tex_rect.x as f32,
-                    tex_rect.y as f32,
-                    tex_rect.width as f32,
-                    tex_rect.height as f32,
-                ],
-                tex_coord: [u, v],
-                value: texture.value as f32 / 255.,
-                lightmap_coord: lightmap
-                    .map(|((minu, minv), lightmap_result)| {
-                        [
-                            (lightmap_result.first.x as f32 + (u / 16.).floor() - minu),
-                            (lightmap_result.first.y as f32 + (v / 16.).floor() - minv),
-                        ]
-                    })
-                    .unwrap_or_default(),
-                lightmap_width: lightmap
-                    .map(|(_, lightmap_result)| lightmap_result.stride_x as f32)
-                    .unwrap_or_default(),
-                lightmap_count: count,
-            }
-        }));
+            (
+                TexturedVertex {
+                    pos: [vert.x(), vert.y(), vert.z(), 1.],
+                    tex_coord: [u, v],
+                },
+                WorldVertex {
+                    atlas_texture: [
+                        tex_rect.x as f32,
+                        tex_rect.y as f32,
+                        tex_rect.width as f32,
+                        tex_rect.height as f32,
+                    ],
+                    value: texture.value as f32 / 255.,
+                    lightmap_coord: lightmap
+                        .map(|((minu, minv), lightmap_result)| {
+                            [
+                                (lightmap_result.first.x as f32 + (u / 16.).floor() - minu),
+                                (lightmap_result.first.y as f32 + (v / 16.).floor() - minv),
+                            ]
+                        })
+                        .unwrap_or_default(),
+                    lightmap_width: lightmap
+                        .map(|(_, lightmap_result)| lightmap_result.stride_x as f32)
+                        .unwrap_or_default(),
+                    lightmap_count: count,
+                },
+            )
+        }) {
+            tex_vertices.push(tex_vert);
+            world_vertices.push(world_vert);
+        }
     }
 
     let face_start_indices: &'a [u32] = &*face_start_indices;
 
     (
-        vertices,
+        tex_vertices,
+        world_vertices,
         bsp.models().map(move |model| {
             (
                 model.data,
@@ -175,7 +189,8 @@ impl LoadAsset for BspAsset {
         let RenderCache {
             diffuse,
             lightmap,
-            vertices,
+            textured_vertices,
+            world_vertices,
             indices,
         } = cache;
 
@@ -206,10 +221,10 @@ impl LoadAsset for BspAsset {
             }
         };
 
-        let (vert_offset, model_ranges, cluster_meta) = {
+        let (tex_vert_offset, world_vert_offset, model_ranges, cluster_meta) = {
             use std::convert::TryInto;
 
-            let (leaf_vertices, mut model_indices) =
+            let (leaf_tex_vertices, leaf_world_vertices, mut model_indices) =
                 leaf_meshes(&bsp, &mut buf, &mut get_texture, lightmap);
             let mut clusters = vec![
                 (vec![], Point3::from([0f32; 3]), Point3::from([0f32; 3]));
@@ -235,12 +250,13 @@ impl LoadAsset for BspAsset {
                 }
             }
 
-            let leaf_vertices = vertices.append(leaf_vertices);
+            let leaf_tex_vertices = textured_vertices.append(leaf_tex_vertices);
+            let leaf_world_vertices = world_vertices.append(leaf_world_vertices);
 
             let (base_model_range, cluster_ranges): (_, Result<Vec<_>, _>) = indices.append_many(
                 clusters
                     .iter_mut()
-                    .map(|(iterators, _, _)| iterators.drain(..).flat_map(|i| i)),
+                    .map(|(iterators, _, _)| iterators.drain(..).flatten()),
             );
 
             let cluster_meta = cluster_ranges?
@@ -275,14 +291,21 @@ impl LoadAsset for BspAsset {
                 model_ranges.push(range.start as u32..range.end as u32);
             }
 
-            (leaf_vertices.start, model_ranges, cluster_meta)
+            (
+                leaf_tex_vertices.start,
+                leaf_world_vertices.start,
+                model_ranges,
+                cluster_meta,
+            )
         };
 
         Ok(World {
             vis: bsp.vis,
-            vert_offset,
+            tex_vert_offset,
+            world_vert_offset,
             cluster_meta,
             model_ranges,
+            last_cluster: None,
         })
     }
 }
@@ -344,11 +367,12 @@ mod hack {
     }
 }
 
-impl<'a> Render for &'a World {
+impl<'a> Render for &'a mut World {
     type Indices = WorldIndexIter<'a>;
+    const PIPELINE: PipelineDesc = PipelineDesc::World;
 
     #[inline]
-    fn indices(self, ctx: &RenderContext) -> (u64, Self::Indices) {
+    fn indices(self, ctx: &RenderContext) -> RenderMesh<Self::Indices> {
         let pos: [f32; 3] = ctx.camera.position.into();
         let cluster_meta = &self.cluster_meta;
         let vis = &self.vis;
@@ -357,21 +381,28 @@ impl<'a> Render for &'a World {
         let cluster = vis
             .model(0)
             .unwrap()
-            .cluster_at::<bsp::XEastYSouthZUp, _>(pos);
+            .cluster_at::<bsp::XEastYSouthZUp, _>(pos)
+            .or(self.last_cluster);
 
-        let model_start_index = if cluster.is_some() { 1 } else { 0 };
+        self.last_cluster = cluster;
+
+        // TODO: We should separate these somewhat so we have a way to move models around
+        let model_start_index = 1;
 
         let clusters = hack::impl_trait_hack(vis, cluster);
 
-        (
-            self.vert_offset,
-            WorldIndexIter {
+        RenderMesh {
+            offsets: (
+                Some(self.tex_vert_offset.into()),
+                Some(self.world_vert_offset.into()),
+            ),
+            indices: WorldIndexIter {
                 clusters,
                 cluster_meta,
                 models: self.vis.models[model_start_index..].iter(),
                 model_ranges: self.model_ranges[model_start_index..].iter(),
                 clipper,
             },
-        )
+        }
     }
 }

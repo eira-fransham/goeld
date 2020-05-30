@@ -57,8 +57,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
     let mut sky = None;
     let mut camera = None;
 
-    renderer.set_msaa_factor(2);
-
     'find_special_entities: for entity in bsp.entities.iter() {
         let mut is_player_start = false;
         let mut is_worldspawn = false;
@@ -163,6 +161,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let update_dt = time::Duration::from_secs_f64(DT);
     let render_dt = time::Duration::from_secs_f64(DT);
+
+    let mut consecutive_timeouts = 0usize;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(
@@ -300,9 +300,23 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                             ..
                         },
                     ..
-                } => {
-                    keys_down.insert(keycode);
-                }
+                } => match keycode {
+                    event::VirtualKeyCode::O => {
+                        renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(4));
+                    }
+                    event::VirtualKeyCode::P => {
+                        renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(4));
+                    }
+                    event::VirtualKeyCode::K => {
+                        renderer.set_gamma((renderer.gamma() - 0.05).max(0.5).min(4.0));
+                    }
+                    event::VirtualKeyCode::L => {
+                        renderer.set_gamma((renderer.gamma() + 0.05).max(0.5).min(4.0));
+                    }
+                    keycode => {
+                        keys_down.insert(keycode);
+                    }
+                },
                 WindowEvent::KeyboardInput {
                     input:
                         event::KeyboardInput {
@@ -316,20 +330,32 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 }
                 _ => {}
             },
-            Event::RedrawRequested(_) => {
-                let frame = swap_chain
-                    .get_next_texture()
-                    .expect("Timeout when acquiring next swap chain texture");
+            Event::RedrawRequested(_) => match swap_chain.get_next_texture() {
+                Ok(frame) => {
+                    consecutive_timeouts = 0;
 
-                for commands in renderer.render(&device, &camera, &frame.view, &queue, |mut ctx| {
-                    if let Some(sky) = &sky {
-                        ctx.render(sky);
+                    for commands in
+                        renderer.render(&device, &camera, &frame.view, &queue, |mut ctx| {
+                            if let Some(sky) = &sky {
+                                ctx.render(sky);
+                            }
+                            ctx.render(&mut bsp);
+                        })
+                    {
+                        queue.submit(iter::once(commands));
                     }
-                    ctx.render(&mut bsp);
-                }) {
-                    queue.submit(iter::once(commands));
                 }
-            }
+                Err(_) => {
+                    consecutive_timeouts += 1;
+
+                    if consecutive_timeouts > FPS as usize * 3 {
+                        panic!(
+                            "Timeout aquiring swap chain texture ({} consecutive timeouts",
+                            consecutive_timeouts
+                        );
+                    }
+                }
+            },
             _ => {}
         }
     });

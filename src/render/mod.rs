@@ -194,8 +194,10 @@ pub trait DoRender {
 
 pub struct Renderer {
     cache: RenderCache,
-    matrices: wgpu::Buffer,
-    fragment_uniforms: wgpu::Buffer,
+    matrices_buffer: wgpu::Buffer,
+    fragment_uniforms: FragmentUniforms,
+    fragment_uniforms_dirty: bool,
+    fragment_uniforms_buffer: wgpu::Buffer,
     out_size: (u32, u32),
     nearest_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
@@ -348,15 +350,39 @@ impl DoRender for RenderContext<'_> {
     }
 }
 
+/// The view and projection matrices_buffer, used by the vertex shader.
+/// Since we only split these out to make implementing the sky
+/// shader simpler, the "projection matrix" actually includes
+/// rotation - we just don't do translation.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Matrices {
-    view: cgmath::Matrix4<f32>,
+    /// Translation, in the Quake coordinate system
+    translation: cgmath::Matrix4<f32>,
+    /// The rest of the view/projection matrix, so rotation,
+    /// con
     projection: cgmath::Matrix4<f32>,
+}
+
+/// The uniforms used by the
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct FragmentUniforms {
+    /// (width, height) of the diffuse atlas
+    diffuse_atlas_size: [f32; 2],
+    /// (width, height) of the lightmap atlas
+    lightmap_atlas_size: [f32; 2],
+    /// The amount to exponentiate the output colour by
+    inv_gamma: f32,
+    /// The amount to multiply the output colour by
+    intensity: f32,
 }
 
 unsafe impl Pod for Matrices {}
 unsafe impl Zeroable for Matrices {}
+
+unsafe impl Pod for FragmentUniforms {}
+unsafe impl Zeroable for FragmentUniforms {}
 
 impl Renderer {
     pub fn init(device: &wgpu::Device, out_size: (u32, u32), gamma: f32, intensity: f32) -> Self {
@@ -391,21 +417,23 @@ impl Renderer {
             compare: wgpu::CompareFunction::Undefined,
         });
 
-        let matrices = device.create_buffer(&wgpu::BufferDescriptor {
+        let matrices_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mat4_viewmatrix"),
             size: std::mem::size_of::<Matrices>() as u64,
             usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
         });
 
-        let fragment_uniforms = device.create_buffer_with_data(
-            bytemuck::cast_slice(&[
-                cache.diffuse.width() as f32,
-                cache.diffuse.height() as f32,
+        let fragment_uniforms = FragmentUniforms {
+            diffuse_atlas_size: [cache.diffuse.width() as f32, cache.diffuse.height() as f32],
+            lightmap_atlas_size: [
                 cache.lightmap.width() as f32,
                 cache.lightmap.height() as f32,
-                1. / gamma,
-                intensity,
-            ]),
+            ],
+            inv_gamma: gamma.recip(),
+            intensity,
+        };
+        let fragment_uniforms_buffer = device.create_buffer_with_data(
+            bytemuck::cast_slice(&[fragment_uniforms]),
             wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
         );
 
@@ -415,8 +443,8 @@ impl Renderer {
             &lightmap_atlas_view,
             &nearest_sampler,
             &linear_sampler,
-            &matrices,
-            &fragment_uniforms,
+            &matrices_buffer,
+            &fragment_uniforms_buffer,
             1,
         );
 
@@ -424,8 +452,8 @@ impl Renderer {
             device,
             &diffuse_atlas_view,
             &linear_sampler,
-            &matrices,
-            &fragment_uniforms,
+            &matrices_buffer,
+            &fragment_uniforms_buffer,
             1,
         );
 
@@ -461,8 +489,10 @@ impl Renderer {
 
         Self {
             out_size,
-            matrices,
+            matrices_buffer,
             fragment_uniforms,
+            fragment_uniforms_dirty: false,
+            fragment_uniforms_buffer,
             world_pipeline,
             skybox_pipeline,
             post_pipeline: None,
@@ -477,9 +507,11 @@ impl Renderer {
     }
 
     pub fn set_size(&mut self, size: (u32, u32)) {
-        self.out_size = size;
-        self.msaa_buffer = None;
-        self.depth_buffer = None;
+        if size != self.out_size {
+            self.out_size = size;
+            self.msaa_buffer = None;
+            self.depth_buffer = None;
+        }
     }
 
     pub fn set_msaa_factor(&mut self, factor: u8) {
@@ -493,6 +525,19 @@ impl Renderer {
         {
             self.msaa_buffer = None;
         }
+    }
+
+    pub fn msaa_factor(&self) -> u8 {
+        self.msaa_factor.get()
+    }
+
+    pub fn set_gamma(&mut self, gamma: f32) {
+        self.fragment_uniforms.inv_gamma = gamma.recip();
+        self.fragment_uniforms_dirty = true;
+    }
+
+    pub fn gamma(&self) -> f32 {
+        self.fragment_uniforms.inv_gamma.recip()
     }
 
     fn make_depth_tex(&self, device: &wgpu::Device) -> wgpu::TextureView {
@@ -544,8 +589,8 @@ impl Renderer {
                 &lightmap_atlas_view,
                 &self.nearest_sampler,
                 &self.linear_sampler,
-                &self.matrices,
-                &self.fragment_uniforms,
+                &self.matrices_buffer,
+                &self.fragment_uniforms_buffer,
                 self.msaa_factor.get() as u32,
             );
 
@@ -553,8 +598,8 @@ impl Renderer {
                 device,
                 &diffuse_atlas_view,
                 &self.linear_sampler,
-                &self.matrices,
-                &self.fragment_uniforms,
+                &self.matrices_buffer,
+                &self.fragment_uniforms_buffer,
                 self.msaa_factor.get() as u32,
             );
 
@@ -562,7 +607,7 @@ impl Renderer {
                 device,
                 self.msaa_buffer.as_ref().map(|(_, buf)| buf).unwrap(),
                 &self.linear_sampler,
-                &self.fragment_uniforms,
+                &self.fragment_uniforms_buffer,
                 self.msaa_factor.get() as u32,
             ));
         }
@@ -600,13 +645,24 @@ impl Renderer {
             return None.into_iter().flatten();
         };
 
-        let view = camera.translation();
+        let translation = camera.translation();
         let projection = camera.projection();
         queue.write_buffer(
-            &self.matrices,
+            &self.matrices_buffer,
             0,
-            bytemuck::cast_slice(&[Matrices { view, projection }]),
+            bytemuck::cast_slice(&[Matrices {
+                translation,
+                projection,
+            }]),
         );
+        if self.fragment_uniforms_dirty {
+            self.fragment_uniforms_dirty = false;
+            queue.write_buffer(
+                &self.fragment_uniforms_buffer,
+                0,
+                bytemuck::cast_slice(&[self.fragment_uniforms]),
+            );
+        }
 
         let depth = if let Some(depth) = &self.depth_buffer {
             depth

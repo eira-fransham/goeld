@@ -39,8 +39,8 @@ fn leaf_meshes<'a, F>(
     Vec<WorldVertex>,
     impl ExactSizeIterator<
             Item = (
-                &'a bsp::Model,
-                impl Iterator<Item = (&'a bsp::Leaf, impl Iterator<Item = u32> + Clone + 'a)>
+                &'a bsp::Q2Model,
+                impl Iterator<Item = (&'a bsp::Q2Leaf, impl Iterator<Item = u32> + Clone + 'a)>
                     + Clone
                     + 'a,
             ),
@@ -48,7 +48,7 @@ fn leaf_meshes<'a, F>(
         + 'a,
 )
 where
-    F: FnMut(&bsp::Texture) -> Option<rect_packer::Rect>,
+    F: FnMut(&bsp::Q2Texture) -> Option<rect_packer::Rect>,
 {
     // We'll probably need to reallocate a few times since vertices are reused,
     // but this is a reasonable lower bound
@@ -89,21 +89,22 @@ where
 
         for (tex_vert, world_vert) in face.vertices().map(|vert| {
             let (u, v) = (
-                vert.dot(&texture.axis_u) + texture.offset_u,
-                vert.dot(&texture.axis_v) + texture.offset_v,
+                vert.dot(&texture.offsets.axis_u) + texture.offsets.offset_u,
+                vert.dot(&texture.offsets.axis_v) + texture.offsets.offset_v,
             );
             (
                 TexturedVertex {
                     pos: [vert.x(), vert.y(), vert.z(), 1.],
                     tex_coord: [u, v],
+                    atlas_texture: [
+                        tex_rect.x as u32,
+                        tex_rect.y as u32,
+                        tex_rect.width as u32,
+                        tex_rect.height as u32,
+                    ],
                 },
                 WorldVertex {
-                    atlas_texture: [
-                        tex_rect.x as f32,
-                        tex_rect.y as f32,
-                        tex_rect.width as f32,
-                        tex_rect.height as f32,
-                    ],
+                    count: texture.frames().count() as u32,
                     value: texture.value as f32 / 255.,
                     lightmap_coord: lightmap
                         .map(|((minu, minv), lightmap_result)| {
@@ -167,6 +168,7 @@ impl LoadAsset for BspAsset {
 
     #[inline]
     fn load(self, loader: &Loader, cache: &mut RenderCache) -> anyhow::Result<Self::Asset> {
+        use image::GenericImageView;
         use std::{collections::hash_map::Entry, path::Path};
 
         let mut buf = Vec::new();
@@ -194,26 +196,51 @@ impl LoadAsset for BspAsset {
             indices,
         } = cache;
 
-        let mut get_texture = move |texture: &bsp::Texture| {
+        let bsp_ref = &bsp;
+
+        let mut get_texture = move |texture: &bsp::Q2Texture| {
             if texture.flags.contains(bsp::SurfaceFlags::NODRAW)
                 || texture.flags.contains(bsp::SurfaceFlags::SKY)
             {
                 None
             } else {
-                let rect = (|| match texture_map.entry(texture.name.clone()) {
+                let rect = (|| match texture_map.entry(
+                    bsp::Handle::new(bsp_ref, texture)
+                        .frames()
+                        .map(|t| t.name.clone())
+                        .collect::<Box<[_]>>(),
+                ) {
                     Entry::Occupied(val) => Some(val.get().clone()),
                     Entry::Vacant(entry) => {
                         let (file, path) = loader.load(Path::new(&texture.name[..]).into()).ok()?;
 
-                        let rect = diffuse.append(
-                            image::load(
-                                std::io::BufReader::new(file),
-                                image::ImageFormat::from_path(&path).ok()?,
-                            )
-                            .ok()?,
-                        );
+                        let first = image::load(
+                            std::io::BufReader::new(file),
+                            image::ImageFormat::from_path(&path).ok()?,
+                        )
+                        .ok()?;
 
-                        Some(entry.insert(rect).clone())
+                        let width = first.width();
+                        let height = first.height();
+                        let frames =
+                            std::iter::once(Ok(first))
+                                .chain(bsp::Handle::new(bsp_ref, texture).frames().skip(1).map(
+                                    |t| {
+                                        let (file, path) =
+                                            loader.load(Path::new(&t.name[..]).into())?;
+
+                                        image::load(
+                                            std::io::BufReader::new(file),
+                                            image::ImageFormat::from_path(&path)?,
+                                        )
+                                    },
+                                ))
+                                .collect::<Result<Vec<_>, _>>()
+                                .ok()?;
+
+                        let appended = diffuse.append_many(width, height, frames.into_iter());
+
+                        Some(entry.insert(appended.first).clone())
                     }
                 })();
 
@@ -314,7 +341,7 @@ pub struct WorldIndexIter<'a> {
     clusters: hack::ImplTraitHack<'a>,
     cluster_meta: &'a [ClusterMeta],
     model_ranges: std::slice::Iter<'a, Range<u32>>,
-    models: std::slice::Iter<'a, bsp::Model>,
+    models: std::slice::Iter<'a, bsp::Q2Model>,
     clipper: Frustum<f32>,
 }
 

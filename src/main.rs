@@ -138,6 +138,14 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut bsp = BspAsset(bsp).load(&loader, renderer.cache_mut()).unwrap();
 
+    let model = MdlAsset(
+        model_importer
+            .read_file("data/models/chumtoad.mdl")
+            .unwrap(),
+    )
+    .load(&loader, renderer.cache_mut())
+    .unwrap();
+
     let mut sc_desc = wgpu::SwapChainDescriptor {
         usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
         format: wgpu::TextureFormat::Bgra8UnormSrgb,
@@ -150,9 +158,11 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut last_update_inst = time::Instant::now();
     let mut last_render_inst = time::Instant::now();
+    let mut last_anim_frame = time::Instant::now();
 
     const FPS: f64 = 60.;
     const DT: f64 = 1. / FPS;
+    const ANIM_DT: f64 = 1. / 5.;
     const DEG_PER_SEC: cgmath::Deg<f32> = cgmath::Deg(30.);
     const MOVEMENT_VEL: cgmath::Vector3<f32> = cgmath::Vector3::new(400., 0., 0.);
 
@@ -161,15 +171,25 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let update_dt = time::Duration::from_secs_f64(DT);
     let render_dt = time::Duration::from_secs_f64(DT);
+    let anim_dt = time::Duration::from_secs_f64(ANIM_DT);
 
     let mut consecutive_timeouts = 0usize;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(
-            (last_update_inst + update_dt).min(last_render_inst + render_dt),
+            (last_update_inst + update_dt)
+                .min(last_render_inst + render_dt)
+                .min(last_anim_frame + anim_dt),
         );
 
-        let mut elapsed = last_update_inst.elapsed();
+        let now = time::Instant::now();
+
+        if now - last_anim_frame >= anim_dt {
+            last_anim_frame = now;
+            renderer.advance_frame();
+        }
+
+        let mut elapsed = now - last_update_inst;
 
         if elapsed >= update_dt {
             while elapsed >= update_dt {
@@ -218,12 +238,12 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 elapsed -= update_dt;
             }
 
-            last_update_inst = time::Instant::now() - elapsed;
+            last_update_inst = now - elapsed;
         }
 
         match event {
             Event::MainEventsCleared => {
-                if last_render_inst.elapsed() > render_dt {
+                if now - last_render_inst > render_dt {
                     window.request_redraw();
                     last_render_inst = time::Instant::now();
                 }
@@ -302,10 +322,10 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     ..
                 } => match keycode {
                     event::VirtualKeyCode::O => {
-                        renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(4));
+                        renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
                     }
                     event::VirtualKeyCode::P => {
-                        renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(4));
+                        renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
                     }
                     event::VirtualKeyCode::K => {
                         renderer.set_gamma((renderer.gamma() - 0.05).max(0.5).min(4.0));
@@ -334,16 +354,19 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 Ok(frame) => {
                     consecutive_timeouts = 0;
 
-                    for commands in
-                        renderer.render(&device, &camera, &frame.view, &queue, |mut ctx| {
+                    queue.submit(renderer.render(
+                        &device,
+                        &camera,
+                        &frame.view,
+                        &queue,
+                        |mut ctx| {
                             if let Some(sky) = &sky {
                                 ctx.render(sky);
                             }
                             ctx.render(&mut bsp);
-                        })
-                    {
-                        queue.submit(iter::once(commands));
-                    }
+                            ctx.render(&model);
+                        },
+                    ))
                 }
                 Err(_) => {
                     consecutive_timeouts += 1;

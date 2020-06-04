@@ -32,16 +32,92 @@ fn error(msg: impl ToString) -> io::Error {
     panic!("{}", msg.to_string())
 }
 
+#[derive(Debug, Default, PartialEq)]
+pub struct GenericDirectories {
+    area_portals: DirEntry,
+    areas: DirEntry,
+    brushes: DirEntry,
+    brush_sides: DirEntry,
+
+    // Goldsrc-specific
+    clipnodes: DirEntry,
+
+    edges: DirEntry,
+    entities: DirEntry,
+    faces: DirEntry,
+    leaf_brushes: DirEntry,
+    leaf_faces: DirEntry,
+    leaves: DirEntry,
+    lightmaps: DirEntry,
+
+    // Goldsrc-specific
+    miptexes: DirEntry,
+
+    models: DirEntry,
+    nodes: DirEntry,
+    planes: DirEntry,
+    surf_edges: DirEntry,
+    textures: DirEntry,
+    vertices: DirEntry,
+    visdata: DirEntry,
+}
+
 pub trait BspFormat {
     const VERSION: u32;
 
     type Magic: SimpleParse;
-    type Directories: ElementSize + SimpleParse + Into<Quake2Directories>;
+    type Directories: ElementSize + SimpleParse + Into<GenericDirectories>;
+    type Texture: BspTexture<Self> + SimpleParse + ElementSize + Clone;
+    type Miptexes: ReadEntry + Clone + Default;
+    type Model: BspModel + SimpleParse + ElementSize + Clone;
+    type Leaf: BspLeaf + SimpleParse + ElementSize + Clone;
+    type VisData: ReadEntry + Clone + Default;
 }
 
-pub struct Quake2;
+pub trait ReadEntry: Sized {
+    fn read<R: io::Read + io::Seek>(reader: R, entry: &DirEntry) -> io::Result<Self>;
+}
+
+impl ReadEntry for () {
+    fn read<R: io::Read + io::Seek>(reader: R, entry: &DirEntry) -> io::Result<Self> {
+        Ok(())
+    }
+}
+
+pub trait BspTexture<B: BspFormat + ?Sized>: Sized {
+    type Format: image::Pixel;
+
+    fn name<'a>(&'a self, bsp: &'a Bsp<B>) -> &'a str;
+    fn data(&self, bsp: &Bsp<B>) -> Option<image::ImageBuffer<Self::Format, &[u8]>>;
+    fn offsets(&self) -> &TextureOffsets;
+}
+
+pub trait BspLeaf {
+    fn cluster(&self) -> i16;
+}
+
+pub trait BspModel {
+    type Hulls: Iterator<Item = u32>;
+
+    fn hulls(&self) -> Self::Hulls;
+}
+
+pub enum Quake2 {}
 
 const QUAKE2_MAGIC: [u8; 4] = [b'I', b'B', b'S', b'P'];
+
+#[derive(Debug, Clone, Copy)]
+pub enum NotApplicable {}
+
+impl SimpleParse for NotApplicable {
+    fn parse<R: io::Read>(_r: &mut R) -> io::Result<Self> {
+        unreachable!()
+    }
+}
+
+impl ElementSize for NotApplicable {
+    const SIZE: usize = usize::MAX;
+}
 
 impl BspFormat for Quake2 {
     type Magic = Magic<QUAKE2_MAGIC>;
@@ -49,15 +125,56 @@ impl BspFormat for Quake2 {
     const VERSION: u32 = 0x26;
 
     type Directories = Quake2Directories;
+    type Texture = Q2Texture;
+    type Miptexes = ();
+    type Model = Q2Model;
+    type Leaf = Q2Leaf;
+    type VisData = Q2VisData;
 }
 
-pub struct Goldsrc;
+pub enum Goldsrc {}
 
 impl BspFormat for Goldsrc {
     const VERSION: u32 = 0x1e;
 
     type Magic = ();
     type Directories = GoldsrcDirectories;
+    type Texture = GoldsrcTexture;
+    type Miptexes = Box<[GoldsrcMiptex]>;
+    type Model = GoldsrcModel;
+    type Leaf = GoldsrcLeaf;
+    type VisData = GoldsrcVisData;
+}
+
+parseable! {
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct GoldsrcMiptex {
+        pub name: ArrayString<[u8; 16]>,
+        pub extents: [u32; 2],
+        pub offsets: [u32; 4], // TODO: We don't support loading these yet
+    }
+}
+
+impl ReadEntry for Box<[GoldsrcMiptex]> {
+    fn read<R: io::Read + io::Seek>(mut reader: R, entry: &DirEntry) -> io::Result<Self> {
+        reader.seek(io::SeekFrom::Start(entry.offset as u64))?;
+
+        let count: u32 = SimpleParse::parse(&mut reader)?;
+
+        let offsets: Box<[i32]> = i32::parse_many(&mut reader, count as usize)?;
+
+        let mut miptexes = Vec::with_capacity(count as usize);
+
+        for o in &*offsets {
+            reader.seek(io::SeekFrom::Start(
+                entry.offset as u64 + u64::try_from(*o).map_err(|e| error(e))?,
+            ))?;
+
+            miptexes.push(GoldsrcMiptex::parse(&mut reader)?);
+        }
+
+        Ok(miptexes.into_boxed_slice())
+    }
 }
 
 parseable! {
@@ -65,33 +182,42 @@ parseable! {
     pub struct GoldsrcDirectories {
         entities: DirEntry,
         planes: DirEntry,
-        // TODO: In Goldsrc, `textures` is for _inline textures_, and `texinfo` is more
-        //       similar to the `textures` lump in Quake 2.
-        textures: DirEntry,
+        miptexes: DirEntry,
         vertices: DirEntry,
         visdata: DirEntry,
         nodes: DirEntry,
+        textures: DirEntry,
         faces: DirEntry,
         lightmaps: DirEntry,
         clipnodes: DirEntry,
         leaves: DirEntry,
         leaf_faces: DirEntry,
-        leaf_brushes: DirEntry,
         edges: DirEntry,
         surf_edges: DirEntry,
         models: DirEntry,
-        brushes: DirEntry,
-        brush_sides: DirEntry,
-        // Appears to be unused, even in Quake 2 itself
-        areas: DirEntry,
-        area_portals: DirEntry,
     }
 }
 
-impl From<GoldsrcDirectories> for Quake2Directories {
-    #[inline]
-    fn from(_other: GoldsrcDirectories) -> Self {
-        todo!()
+impl From<GoldsrcDirectories> for GenericDirectories {
+    fn from(other: GoldsrcDirectories) -> Self {
+        Self {
+            entities: other.entities,
+            planes: other.planes,
+            miptexes: other.miptexes,
+            vertices: other.vertices,
+            visdata: other.visdata,
+            nodes: other.nodes,
+            textures: other.textures,
+            faces: other.faces,
+            lightmaps: other.lightmaps,
+            clipnodes: other.clipnodes,
+            leaves: other.leaves,
+            leaf_faces: other.leaf_faces,
+            edges: other.edges,
+            surf_edges: other.surf_edges,
+            models: other.models,
+            ..Default::default()
+        }
     }
 }
 
@@ -121,9 +247,35 @@ parseable! {
     }
 }
 
+impl From<Quake2Directories> for GenericDirectories {
+    fn from(other: Quake2Directories) -> Self {
+        Self {
+            entities: other.entities,
+            planes: other.planes,
+            vertices: other.vertices,
+            visdata: other.visdata,
+            nodes: other.nodes,
+            textures: other.textures,
+            faces: other.faces,
+            lightmaps: other.lightmaps,
+            leaves: other.leaves,
+            leaf_faces: other.leaf_faces,
+            leaf_brushes: other.leaf_brushes,
+            edges: other.edges,
+            surf_edges: other.surf_edges,
+            models: other.models,
+            brushes: other.brushes,
+            brush_sides: other.brush_sides,
+            areas: other.areas,
+            area_portals: other.area_portals,
+            ..Default::default()
+        }
+    }
+}
+
 parseable! {
     #[derive(Clone, Debug, Default, PartialEq)]
-    struct DirEntry {
+    pub struct DirEntry {
         offset: u32,
         length: u32,
     }
@@ -337,7 +489,7 @@ impl SimpleParse for ContentFlags {
     #[inline]
     fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
         u32::parse(r).and_then(|v| {
-            ContentFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+            Ok(ContentFlags::from_bits(v).unwrap_or_default()) // ContentFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
         })
     }
 }
@@ -350,7 +502,7 @@ impl SimpleParse for SurfaceFlags {
     #[inline]
     fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
         u32::parse(r).and_then(|v| {
-            SurfaceFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+            Ok(SurfaceFlags::from_bits(v).unwrap_or_default()) //SurfaceFlags::from_bits(v).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
         })
     }
 }
@@ -359,12 +511,19 @@ const TEXTURE_NAME_SIZE: usize = 32;
 
 parseable! {
     #[derive(Default, Debug, Clone, PartialEq)]
-    pub struct Texture {
+    pub struct TextureOffsets {
         pub axis_u: QVec,
         pub offset_u: f32,
 
         pub axis_v: QVec,
         pub offset_v: f32,
+    }
+}
+
+parseable! {
+    #[derive(Default, Debug, Clone, PartialEq)]
+    pub struct Q2Texture {
+        pub offsets: TextureOffsets,
 
         pub flags: SurfaceFlags,
         pub value: u32,
@@ -374,6 +533,170 @@ parseable! {
     }
 }
 
+parseable! {
+    #[derive(Default, Debug, Clone, PartialEq)]
+    pub struct GoldsrcTexture {
+        pub offsets: TextureOffsets,
+
+        pub texture_index: u32,
+        pub flags: SurfaceFlags,
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum NoFormat {}
+
+impl image::Pixel for NoFormat {
+    type Subpixel = u8;
+
+    const CHANNEL_COUNT: u8 = 0;
+    const COLOR_MODEL: &'static str = "";
+    const COLOR_TYPE: image::ColorType = image::ColorType::L8;
+
+    fn channels(&self) -> &[Self::Subpixel] {
+        unreachable!()
+    }
+
+    fn channels_mut(&mut self) -> &mut [Self::Subpixel] {
+        unreachable!()
+    }
+
+    fn channels4(
+        &self,
+    ) -> (
+        Self::Subpixel,
+        Self::Subpixel,
+        Self::Subpixel,
+        Self::Subpixel,
+    ) {
+        unreachable!()
+    }
+
+    fn from_channels(
+        _a: Self::Subpixel,
+        _b: Self::Subpixel,
+        _c: Self::Subpixel,
+        _d: Self::Subpixel,
+    ) -> Self {
+        unreachable!()
+    }
+
+    fn from_slice(_slice: &[Self::Subpixel]) -> &Self {
+        unreachable!()
+    }
+
+    fn from_slice_mut(_slice: &mut [Self::Subpixel]) -> &mut Self {
+        unreachable!()
+    }
+
+    fn to_rgb(&self) -> image::Rgb<Self::Subpixel> {
+        unreachable!()
+    }
+
+    fn to_rgba(&self) -> image::Rgba<Self::Subpixel> {
+        unreachable!()
+    }
+
+    fn to_luma(&self) -> image::Luma<Self::Subpixel> {
+        unreachable!()
+    }
+
+    fn to_luma_alpha(&self) -> image::LumaA<Self::Subpixel> {
+        unreachable!()
+    }
+
+    fn to_bgr(&self) -> image::Bgr<Self::Subpixel> {
+        unreachable!()
+    }
+
+    fn to_bgra(&self) -> image::Bgra<Self::Subpixel> {
+        unreachable!()
+    }
+
+    fn map<F>(&self, _f: F) -> Self
+    where
+        F: FnMut(Self::Subpixel) -> Self::Subpixel,
+    {
+        unreachable!()
+    }
+
+    fn apply<F>(&mut self, _f: F)
+    where
+        F: FnMut(Self::Subpixel) -> Self::Subpixel,
+    {
+        unreachable!()
+    }
+
+    fn map_with_alpha<F, G>(&self, _f: F, _g: G) -> Self
+    where
+        F: FnMut(Self::Subpixel) -> Self::Subpixel,
+        G: FnMut(Self::Subpixel) -> Self::Subpixel,
+    {
+        unreachable!()
+    }
+
+    fn apply_with_alpha<F, G>(&mut self, _f: F, _g: G)
+    where
+        F: FnMut(Self::Subpixel) -> Self::Subpixel,
+        G: FnMut(Self::Subpixel) -> Self::Subpixel,
+    {
+        unreachable!()
+    }
+
+    fn map2<F>(&self, _other: &Self, _f: F) -> Self
+    where
+        F: FnMut(Self::Subpixel, Self::Subpixel) -> Self::Subpixel,
+    {
+        unreachable!()
+    }
+
+    fn apply2<F>(&mut self, _other: &Self, _f: F)
+    where
+        F: FnMut(Self::Subpixel, Self::Subpixel) -> Self::Subpixel,
+    {
+        unreachable!()
+    }
+
+    fn invert(&mut self) {
+        unreachable!()
+    }
+
+    fn blend(&mut self, _other: &Self) {
+        unreachable!()
+    }
+}
+
+impl BspTexture<Quake2> for Q2Texture {
+    type Format = NoFormat;
+
+    fn name<'a>(&'a self, bsp: &'a Bsp<Quake2>) -> &'a str {
+        &self.name
+    }
+
+    fn data(&self, _bsp: &Bsp<Quake2>) -> Option<image::ImageBuffer<Self::Format, &[u8]>> {
+        None
+    }
+
+    fn offsets(&self) -> &TextureOffsets {
+        &self.offsets
+    }
+}
+
+impl BspTexture<Goldsrc> for GoldsrcTexture {
+    type Format = NoFormat;
+
+    fn name<'a>(&'a self, bsp: &'a Bsp<Goldsrc>) -> &'a str {
+        &bsp.miptexes[self.texture_index as usize].name
+    }
+
+    fn data(&self, _bsp: &Bsp<Goldsrc>) -> Option<image::ImageBuffer<Self::Format, &[u8]>> {
+        unimplemented!()
+    }
+
+    fn offsets(&self) -> &TextureOffsets {
+        &self.offsets
+    }
+}
 parseable! {
     #[derive(Default, Debug, Clone, PartialEq)]
     pub struct Plane {
@@ -399,7 +722,7 @@ pub type Cluster = u16;
 
 parseable! {
     #[derive(Default, Debug, Clone, PartialEq)]
-    pub struct Leaf {
+    pub struct Q2Leaf {
         pub contents: ContentFlags,
         pub cluster: i16,
         pub area: u16,
@@ -412,6 +735,32 @@ parseable! {
     }
 }
 
+impl BspLeaf for Q2Leaf {
+    fn cluster(&self) -> i16 {
+        self.cluster
+    }
+}
+
+parseable! {
+    #[derive(Default, Debug, Clone, PartialEq)]
+    pub struct GoldsrcLeaf {
+        pub contents: ContentFlags,
+        // TODO: How to handle this?
+        pub visdata_offset: i32,
+        pub mins: [i16; 3],
+        pub maxs: [i16; 3],
+        pub leaf_face: u16,
+        pub num_leaf_faces: u16,
+        pub ambient_sound_levels: [u8; 4],
+    }
+}
+
+impl BspLeaf for GoldsrcLeaf {
+    fn cluster(&self) -> i16 {
+        unimplemented!()
+    }
+}
+
 parseable! {
     #[derive(Default, Debug, Clone, PartialEq)]
     pub struct LeafBrush {
@@ -421,13 +770,42 @@ parseable! {
 
 parseable! {
     #[derive(Default, Debug, Clone, PartialEq)]
-    pub struct Model {
+    pub struct Q2Model {
         pub mins: QVec,
         pub maxs: QVec,
         pub origin: QVec,
         pub headnode: u32,
         pub face: u32,
         pub num_faces: u32,
+    }
+}
+
+impl BspModel for Q2Model {
+    type Hulls = std::iter::Once<u32>;
+
+    fn hulls(&self) -> Self::Hulls {
+        std::iter::once(self.headnode)
+    }
+}
+
+parseable! {
+    #[derive(Default, Debug, Clone, PartialEq)]
+    pub struct GoldsrcModel {
+        pub mins: QVec,
+        pub maxs: QVec,
+        pub origin: QVec,
+        pub headnodes: [u32; 4],
+        pub visleaf: i32,
+        pub face: u32,
+        pub num_faces: u32,
+    }
+}
+
+impl BspModel for GoldsrcModel {
+    type Hulls = arrayvec::IntoIter<[u32; 4]>;
+
+    fn hulls(&self) -> Self::Hulls {
+        arrayvec::ArrayVec::from(self.headnodes).into_iter()
     }
 }
 
@@ -509,9 +887,134 @@ pub struct VisDataOffsets {
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
-pub struct VisData {
+pub struct Q2VisData {
     pub cluster_offsets: Vec<VisDataOffsets>,
     pub vecs: BitVec<u8>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct GoldsrcVisData {
+    pub vecs: BitVec<u8>,
+}
+
+impl ReadEntry for Q2VisData {
+    fn read<R: io::Read + io::Seek>(mut reader: R, entry: &DirEntry) -> io::Result<Self> {
+        if (entry.length as usize) < std::mem::size_of::<u32>() * 2 {
+            return Ok(Q2VisData::default());
+        }
+
+        reader.seek(SeekFrom::Start(entry.offset as u64))?;
+
+        let num_clusters = u32::parse(&mut reader)?;
+        let mut clusters = Vec::with_capacity(num_clusters.try_into().map_err(|e| error(e))?);
+
+        let mut vecs = Vec::with_capacity((num_clusters as usize * 2) / 8);
+
+        for _ in 0..num_clusters {
+            let pvs = u32::parse(&mut reader)?;
+            let phs = u32::parse(&mut reader)?;
+
+            let current_pos = reader.seek(SeekFrom::Current(0))?;
+
+            reader.seek(SeekFrom::Start(entry.offset as u64 + pvs as u64))?;
+            let pvs_start = vecs.len() as _;
+
+            let mut cluster_bytes = 1 + (num_clusters as usize - 1) / 8;
+            let mut bytes = reader.by_ref().bytes();
+            while cluster_bytes > 0 {
+                let byte = bytes.next().ok_or_else(|| {
+                    error(format!(
+                        "Can't get visdata byte (remaining: {})",
+                        cluster_bytes
+                    ))
+                })??;
+
+                if byte == 0 {
+                    let count = bytes
+                        .next()
+                        .ok_or_else(|| error("RLE visdata has 0 with no count"))??
+                        as usize;
+
+                    cluster_bytes = cluster_bytes.saturating_sub(count);
+
+                    vecs.extend(iter::repeat(0).take(count));
+                } else {
+                    cluster_bytes -= 1;
+
+                    vecs.push(byte);
+                }
+            }
+
+            reader.seek(SeekFrom::Start(entry.offset as u64 + phs as u64))?;
+            let phs_start = vecs.len() as _;
+
+            let mut cluster_bytes = 1 + (num_clusters as usize - 1) / 8;
+            let mut bytes = reader.by_ref().bytes();
+            while cluster_bytes > 0 {
+                let byte = bytes.next().ok_or_else(|| {
+                    error(format!(
+                        "Can't get visdata byte (remaining: {})",
+                        cluster_bytes
+                    ))
+                })??;
+
+                if byte == 0 {
+                    let count = bytes
+                        .next()
+                        .ok_or_else(|| error("RLE visdata has 0 with no count"))??
+                        as usize;
+
+                    cluster_bytes = cluster_bytes.saturating_sub(count);
+
+                    vecs.extend(iter::repeat(0).take(count));
+                } else {
+                    cluster_bytes -= 1;
+
+                    vecs.push(byte);
+                }
+            }
+
+            clusters.push(VisDataOffsets {
+                pvs: pvs_start,
+                phs: phs_start,
+            });
+
+            reader.seek(SeekFrom::Start(current_pos))?;
+        }
+
+        let vecs = BitVec::from_bits(vecs);
+
+        Ok(Q2VisData {
+            cluster_offsets: clusters,
+            vecs,
+        })
+    }
+}
+
+impl ReadEntry for GoldsrcVisData {
+    fn read<R: io::Read + io::Seek>(mut reader: R, entry: &DirEntry) -> io::Result<Self> {
+        reader.seek(SeekFrom::Start(entry.offset as u64))?;
+
+        let mut vecs = Vec::new();
+        let mut bytes = reader.by_ref().bytes();
+
+        while let Some(byte) = bytes.next().map(Result::ok).flatten() {
+            if byte == 0 {
+                let count = bytes
+                    .next()
+                    .ok_or_else(|| error("RLE visdata has 0 with no count"))??
+                    as usize;
+
+                vecs.extend(iter::repeat(0).take(count));
+            } else {
+                vecs.push(byte);
+            }
+        }
+
+        let vecs = BitVec::from_bits(vecs);
+
+        Ok(GoldsrcVisData { vecs })
+    }
 }
 
 struct BspReader<R> {
@@ -550,101 +1053,6 @@ impl<R: Read + Seek> BspReader<R> {
         self.inner.seek(SeekFrom::Start(dir_entry.offset as u64))?;
 
         T::parse_many(&mut self.inner, num_entries)
-    }
-
-    #[inline]
-    fn read_visdata(&mut self, entry: &DirEntry) -> io::Result<VisData> {
-        if (entry.length as usize) < std::mem::size_of::<u32>() * 2 {
-            return Ok(VisData::default());
-        }
-
-        self.inner.seek(SeekFrom::Start(entry.offset as u64))?;
-
-        let num_clusters = u32::parse(&mut self.inner)?;
-        let mut clusters = Vec::with_capacity(num_clusters.try_into().map_err(|e| error(e))?);
-
-        let mut vecs = Vec::with_capacity((num_clusters as usize * 2) / 8);
-
-        for _ in 0..num_clusters {
-            let pvs = u32::parse(&mut self.inner)?;
-            let phs = u32::parse(&mut self.inner)?;
-
-            let current_pos = self.inner.seek(SeekFrom::Current(0))?;
-
-            self.inner
-                .seek(SeekFrom::Start(entry.offset as u64 + pvs as u64))?;
-            let pvs_start = vecs.len() as _;
-
-            let mut cluster_bytes = 1 + (num_clusters as usize - 1) / 8;
-            let mut bytes = self.inner.by_ref().bytes();
-            while cluster_bytes > 0 {
-                let byte = bytes.next().ok_or_else(|| {
-                    error(format!(
-                        "Can't get visdata byte (remaining: {})",
-                        cluster_bytes
-                    ))
-                })??;
-
-                if byte == 0 {
-                    let count = bytes
-                        .next()
-                        .ok_or_else(|| error("RLE visdata has 0 with no count"))??
-                        as usize;
-
-                    cluster_bytes = cluster_bytes.saturating_sub(count);
-
-                    vecs.extend(iter::repeat(0).take(count));
-                } else {
-                    cluster_bytes -= 1;
-
-                    vecs.push(byte);
-                }
-            }
-
-            self.inner
-                .seek(SeekFrom::Start(entry.offset as u64 + phs as u64))?;
-            let phs_start = vecs.len() as _;
-
-            let mut cluster_bytes = 1 + (num_clusters as usize - 1) / 8;
-            let mut bytes = self.inner.by_ref().bytes();
-            while cluster_bytes > 0 {
-                let byte = bytes.next().ok_or_else(|| {
-                    error(format!(
-                        "Can't get visdata byte (remaining: {})",
-                        cluster_bytes
-                    ))
-                })??;
-
-                if byte == 0 {
-                    let count = bytes
-                        .next()
-                        .ok_or_else(|| error("RLE visdata has 0 with no count"))??
-                        as usize;
-
-                    cluster_bytes = cluster_bytes.saturating_sub(count);
-
-                    vecs.extend(iter::repeat(0).take(count));
-                } else {
-                    cluster_bytes -= 1;
-
-                    vecs.push(byte);
-                }
-            }
-
-            clusters.push(VisDataOffsets {
-                pvs: pvs_start,
-                phs: phs_start,
-            });
-
-            self.inner.seek(SeekFrom::Start(current_pos))?;
-        }
-
-        let vecs = BitVec::from_bits(vecs);
-
-        Ok(VisData {
-            cluster_offsets: clusters,
-            vecs,
-        })
     }
 
     #[inline]
@@ -748,10 +1156,10 @@ parseable! {
 }
 
 // TODO: Store all the allocated objects inline to improve cache usage
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct Bsp {
+pub struct Bsp<Format: BspFormat + ?Sized = Quake2> {
     pub entities: Entities,
-    pub textures: Box<[Texture]>,
+    pub miptexes: Format::Miptexes,
+    pub textures: Box<[Format::Texture]>,
     pub leaf_faces: Box<[LeafFace]>,
     pub leaf_brushes: Box<[LeafBrush]>,
     pub edges: Box<[Edge]>,
@@ -763,40 +1171,100 @@ pub struct Bsp {
     pub lightmaps: Box<[u8]>,
     pub areas: Box<[Area]>,
     pub area_portals: Box<[AreaPortal]>,
-    pub vis: Vis,
+    pub vis: Vis<Format>,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct Vis {
-    pub leaves: Box<[Leaf]>,
-    pub nodes: Box<[Node]>,
-    pub planes: Box<[Plane]>,
-    pub models: Box<[Model]>,
-    pub visdata: VisData,
-}
-
-impl AsRef<[Leaf]> for Vis {
-    #[inline]
-    fn as_ref(&self) -> &[Leaf] {
-        &self.leaves
+impl<B: BspFormat + ?Sized> Default for Bsp<B> {
+    fn default() -> Self {
+        Self {
+            entities: Default::default(),
+            miptexes: Default::default(),
+            textures: Default::default(),
+            leaf_faces: Default::default(),
+            leaf_brushes: Default::default(),
+            edges: Default::default(),
+            surf_edges: Default::default(),
+            brushes: Default::default(),
+            brush_sides: Default::default(),
+            vertices: Default::default(),
+            faces: Default::default(),
+            lightmaps: Default::default(),
+            areas: Default::default(),
+            area_portals: Default::default(),
+            vis: Default::default(),
+        }
     }
 }
 
-impl AsRef<[Node]> for Vis {
+impl<B: BspFormat + ?Sized> Clone for Bsp<B> {
+    fn clone(&self) -> Self {
+        Self {
+            entities: self.entities.clone(),
+            miptexes: self.miptexes.clone(),
+            textures: self.textures.clone(),
+            leaf_faces: self.leaf_faces.clone(),
+            leaf_brushes: self.leaf_brushes.clone(),
+            edges: self.edges.clone(),
+            surf_edges: self.surf_edges.clone(),
+            brushes: self.brushes.clone(),
+            brush_sides: self.brush_sides.clone(),
+            vertices: self.vertices.clone(),
+            faces: self.faces.clone(),
+            lightmaps: self.lightmaps.clone(),
+            areas: self.areas.clone(),
+            area_portals: self.area_portals.clone(),
+            vis: self.vis.clone(),
+        }
+    }
+}
+
+pub struct Vis<B: BspFormat + ?Sized = Quake2> {
+    pub leaves: Box<[B::Leaf]>,
+    pub nodes: Box<[Node]>,
+    pub planes: Box<[Plane]>,
+    pub models: Box<[B::Model]>,
+    pub visdata: B::VisData,
+}
+
+impl<B: BspFormat + ?Sized> Clone for Vis<B> {
+    fn clone(&self) -> Self {
+        Self {
+            leaves: self.leaves.clone(),
+            nodes: self.nodes.clone(),
+            planes: self.planes.clone(),
+            models: self.models.clone(),
+            visdata: self.visdata.clone(),
+        }
+    }
+}
+
+impl<B: BspFormat + ?Sized> Default for Vis<B> {
+    fn default() -> Self {
+        Self {
+            leaves: Default::default(),
+            nodes: Default::default(),
+            planes: Default::default(),
+            models: Default::default(),
+            visdata: Default::default(),
+        }
+    }
+}
+
+impl<F: BspFormat> AsRef<[Node]> for Vis<F> {
     #[inline]
     fn as_ref(&self) -> &[Node] {
         &self.nodes
     }
 }
 
-impl AsRef<[Plane]> for Vis {
+impl<F: BspFormat> AsRef<[Plane]> for Vis<F> {
     #[inline]
     fn as_ref(&self) -> &[Plane] {
         &self.planes
     }
 }
 
-impl Vis {
+impl<F: BspFormat> Vis<F> {
     #[inline]
     pub fn node(&self, n: usize) -> Option<Handle<'_, Self, Node>> {
         self.nodes.get(n).map(|node| Handle {
@@ -807,11 +1275,11 @@ impl Vis {
 
     #[inline]
     pub fn root_node(&self) -> Option<Handle<'_, Self, Node>> {
-        self.node(self.models.get(0)?.headnode as usize)
+        self.node(self.models.get(0)?.hulls().next().unwrap() as usize)
     }
 
     #[inline]
-    pub fn leaf(&self, n: usize) -> Option<Handle<'_, Self, Leaf>> {
+    pub fn leaf(&self, n: usize) -> Option<Handle<'_, Self, F::Leaf>> {
         self.leaves.get(n).map(|leaf| Handle {
             bsp: self,
             data: leaf,
@@ -827,7 +1295,7 @@ impl Vis {
     }
 
     #[inline]
-    pub fn model(&self, n: usize) -> Option<Handle<'_, Self, Model>> {
+    pub fn model(&self, n: usize) -> Option<Handle<'_, Self, F::Model>> {
         self.models.get(n).map(|model| Handle {
             bsp: self,
             data: model,
@@ -835,48 +1303,8 @@ impl Vis {
     }
 
     #[inline]
-    pub fn models(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Model>> + Clone {
+    pub fn models(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, F::Model>> + Clone {
         self.models.iter().map(move |m| Handle::new(self, m))
-    }
-
-    #[inline]
-    fn potential_set(
-        &self,
-        leaf_id: usize,
-        offset_fn: impl FnOnce(&VisDataOffsets) -> u32,
-    ) -> impl Iterator<Item = usize> + '_ {
-        use itertools::Either;
-
-        self.leaf(leaf_id)
-            .and_then(|leaf| u32::try_from(leaf.cluster).ok())
-            .map(move |cluster| {
-                let offset = offset_fn(&self.visdata.cluster_offsets[cluster as usize]);
-                Either::Left(
-                    self.leaves
-                        .iter()
-                        .enumerate()
-                        .filter(move |(_, leaf)| {
-                            if let Ok(other_cluster) = u32::try_from(leaf.cluster) {
-                                cluster == other_cluster
-                                    || self.visdata.vecs[offset as u64 * 8 + other_cluster as u64]
-                            } else {
-                                false
-                            }
-                        })
-                        .map(|(i, _)| i),
-                )
-            })
-            .unwrap_or(Either::Right(0..self.leaves.len()))
-    }
-
-    #[inline]
-    pub fn potentially_visible_set(&self, leaf_id: usize) -> impl Iterator<Item = usize> + '_ {
-        self.potential_set(leaf_id, |o| o.pvs)
-    }
-
-    #[inline]
-    pub fn potentially_hearable_set(&self, leaf_id: usize) -> impl Iterator<Item = usize> + '_ {
-        self.potential_set(leaf_id, |o| o.phs)
     }
 
     #[inline]
@@ -884,7 +1312,7 @@ impl Vis {
         &self,
         root: Handle<'_, Self, Node>,
         point: I,
-    ) -> Option<Handle<'_, Self, Leaf>>
+    ) -> Option<Handle<'_, Self, F::Leaf>>
     where
         C: CoordSystem,
     {
@@ -926,7 +1354,7 @@ impl Vis {
     }
 
     #[inline]
-    pub fn leaves(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Leaf>> + Clone {
+    pub fn leaves(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, F::Leaf>> + Clone {
         self.leaves.iter().map(move |leaf| Handle {
             bsp: self,
             data: leaf,
@@ -943,14 +1371,14 @@ impl Vis {
         C: CoordSystem,
     {
         self.leaf_at(root, point)
-            .and_then(|leaf| leaf.cluster.try_into().ok())
+            .and_then(|leaf| leaf.cluster().try_into().ok())
     }
 
     #[inline]
     pub fn leaves_in_cluster(
         &self,
         cluster: impl TryInto<i16>,
-    ) -> impl Iterator<Item = Handle<'_, Self, Leaf>> + Clone + '_ {
+    ) -> impl Iterator<Item = Handle<'_, Self, F::Leaf>> + Clone + '_ {
         // We do this eagerly, so that the returned iterator can be trivially cloned
         cluster
             .try_into()
@@ -958,13 +1386,13 @@ impl Vis {
             .and_then(|cluster| {
                 let any_leaf = self
                     .leaves
-                    .binary_search_by_key(&cluster, |leaf| leaf.cluster)
+                    .binary_search_by_key(&cluster, |leaf| leaf.cluster())
                     .ok()?;
 
                 let mut first_leaf = any_leaf;
                 while first_leaf
                     .checked_sub(1)
-                    .and_then(|i| self.leaves.get(i).map(|leaf| leaf.cluster == cluster))
+                    .and_then(|i| self.leaves.get(i).map(|leaf| leaf.cluster() == cluster))
                     .unwrap_or(false)
                 {
                     first_leaf -= 1;
@@ -977,12 +1405,54 @@ impl Vis {
             .flat_map(move |(cluster, first_leaf)| {
                 self.leaves[first_leaf..]
                     .iter()
-                    .take_while(move |leaf| leaf.cluster == cluster)
+                    .take_while(move |leaf| leaf.cluster() == cluster)
                     .map(move |leaf| Handle {
                         bsp: self,
                         data: leaf,
                     })
             })
+    }
+}
+
+impl Vis<Quake2> {
+    #[inline]
+    fn potential_set(
+        &self,
+        leaf_id: usize,
+        offset_fn: impl FnOnce(&VisDataOffsets) -> u32,
+    ) -> impl Iterator<Item = usize> + '_ {
+        use itertools::Either;
+
+        self.leaf(leaf_id)
+            .and_then(|leaf| u32::try_from(leaf.cluster()).ok())
+            .map(move |cluster| {
+                let offset = offset_fn(&self.visdata.cluster_offsets[cluster as usize]);
+                Either::Left(
+                    self.leaves
+                        .iter()
+                        .enumerate()
+                        .filter(move |(_, leaf)| {
+                            if let Ok(other_cluster) = u32::try_from(leaf.cluster()) {
+                                cluster == other_cluster
+                                    || self.visdata.vecs[offset as u64 * 8 + other_cluster as u64]
+                            } else {
+                                false
+                            }
+                        })
+                        .map(|(i, _)| i),
+                )
+            })
+            .unwrap_or(Either::Right(0..self.leaves.len()))
+    }
+
+    #[inline]
+    pub fn potentially_visible_set(&self, leaf_id: usize) -> impl Iterator<Item = usize> + '_ {
+        self.potential_set(leaf_id, |o| o.pvs)
+    }
+
+    #[inline]
+    pub fn potentially_hearable_set(&self, leaf_id: usize) -> impl Iterator<Item = usize> + '_ {
+        self.potential_set(leaf_id, |o| o.phs)
     }
 
     #[inline]
@@ -1012,138 +1482,113 @@ impl Vis {
     }
 }
 
-impl AsRef<[Texture]> for Bsp {
-    #[inline]
-    fn as_ref(&self) -> &[Texture] {
-        &self.textures
-    }
-}
-
-impl AsRef<[LeafFace]> for Bsp {
+impl<F: BspFormat> AsRef<[LeafFace]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[LeafFace] {
         &self.leaf_faces
     }
 }
 
-impl AsRef<[LeafBrush]> for Bsp {
+impl<F: BspFormat> AsRef<[LeafBrush]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[LeafBrush] {
         &self.leaf_brushes
     }
 }
 
-impl AsRef<[Edge]> for Bsp {
+impl<F: BspFormat> AsRef<[Edge]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[Edge] {
         &self.edges
     }
 }
 
-impl AsRef<[SurfEdge]> for Bsp {
+impl<F: BspFormat> AsRef<[SurfEdge]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[SurfEdge] {
         &self.surf_edges
     }
 }
 
-impl AsRef<[Brush]> for Bsp {
+impl<F: BspFormat> AsRef<[Brush]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[Brush] {
         &self.brushes
     }
 }
 
-impl AsRef<[BrushSide]> for Bsp {
+impl<F: BspFormat> AsRef<[BrushSide]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[BrushSide] {
         &self.brush_sides
     }
 }
 
-impl AsRef<[QVec]> for Bsp {
+impl<F: BspFormat> AsRef<[QVec]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[QVec] {
         &self.vertices
     }
 }
 
-impl AsRef<[Face]> for Bsp {
+impl<F: BspFormat> AsRef<[Face]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[Face] {
         &self.faces
     }
 }
 
-impl AsRef<[Area]> for Bsp {
+impl<F: BspFormat> AsRef<[Area]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[Area] {
         &self.areas
     }
 }
 
-impl AsRef<[AreaPortal]> for Bsp {
+impl<F: BspFormat> AsRef<[AreaPortal]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[AreaPortal] {
         &self.area_portals
     }
 }
 
-impl AsRef<[Model]> for Bsp {
-    #[inline]
-    fn as_ref(&self) -> &[Model] {
-        &self.vis.models
-    }
-}
-
-impl AsRef<[Leaf]> for Bsp {
-    #[inline]
-    fn as_ref(&self) -> &[Leaf] {
-        self.vis.as_ref()
-    }
-}
-
-impl AsRef<[Node]> for Bsp {
+impl<F: BspFormat> AsRef<[Node]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[Node] {
         self.vis.as_ref()
     }
 }
 
-impl AsRef<[Plane]> for Bsp {
+impl<F: BspFormat> AsRef<[Plane]> for Bsp<F> {
     #[inline]
     fn as_ref(&self) -> &[Plane] {
         self.vis.as_ref()
     }
 }
 
-impl Bsp {
+impl<F: BspFormat> Bsp<F> {
     #[inline]
-    pub fn read<R: Read + Seek>(reader: R) -> io::Result<Self> {
-        Self::read_with_format::<R, Quake2>(reader)
-    }
-
-    #[inline]
-    pub fn read_with_format<R: Read + Seek, T: BspFormat>(mut reader: R) -> io::Result<Self> {
-        let _magic = T::Magic::parse(&mut reader)?;
+    pub fn read<R: Read + Seek>(mut reader: R) -> io::Result<Self> {
+        let _magic = F::Magic::parse(&mut reader)?;
         let version = u32::parse(&mut reader)?;
 
-        if version != T::VERSION {
+        if version != F::VERSION {
             return Err(error(format!(
                 "Invalid version (expected {:?}, got {:?})",
-                T::VERSION,
+                F::VERSION,
                 version
             )));
         }
 
-        let dir_entries: Quake2Directories = T::Directories::parse(&mut reader)?.into();
+        let dir_entries: GenericDirectories = F::Directories::parse(&mut reader)?.into();
 
         let mut reader = BspReader { inner: reader };
 
         let entities = reader.read_entities(&dir_entries.entities)?;
         let planes = reader.read_entry(&dir_entries.planes)?;
         let vertices = reader.read_entry(&dir_entries.vertices)?;
-        let visdata = reader.read_visdata(&dir_entries.visdata)?;
+        let miptexes = F::Miptexes::read(&mut reader.inner, &dir_entries.miptexes)?;
+        let visdata = F::VisData::read(&mut reader.inner, &dir_entries.visdata)?;
         let nodes = reader.read_entry(&dir_entries.nodes)?;
         let textures = reader.read_entry(&dir_entries.textures)?;
         let faces = reader.read_entry(&dir_entries.faces)?;
@@ -1163,6 +1608,7 @@ impl Bsp {
         Ok({
             Bsp {
                 entities,
+                miptexes,
                 textures,
                 leaf_faces,
                 leaf_brushes,
@@ -1196,11 +1642,11 @@ impl Bsp {
 
     #[inline]
     pub fn root_node(&self) -> Option<Handle<'_, Self, Node>> {
-        self.node(self.model(0)?.headnode as usize)
+        self.node(self.model(0)?.hulls().next().unwrap() as usize)
     }
 
     #[inline]
-    pub fn leaf(&self, n: usize) -> Option<Handle<'_, Self, Leaf>> {
+    pub fn leaf(&self, n: usize) -> Option<Handle<'_, Self, F::Leaf>> {
         self.vis.leaves.get(n).map(|leaf| Handle {
             bsp: self,
             data: leaf,
@@ -1232,7 +1678,7 @@ impl Bsp {
     }
 
     #[inline]
-    pub fn texture(&self, n: usize) -> Option<Handle<'_, Self, Texture>> {
+    pub fn texture(&self, n: usize) -> Option<Handle<'_, Self, F::Texture>> {
         self.textures.get(n).map(move |texture| Handle {
             bsp: self,
             data: texture,
@@ -1240,12 +1686,12 @@ impl Bsp {
     }
 
     #[inline]
-    pub fn textures(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Texture>> + Clone {
+    pub fn textures(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, F::Texture>> + Clone {
         self.textures.iter().map(move |m| Handle::new(self, m))
     }
 
     #[inline]
-    pub fn model(&self, i: usize) -> Option<Handle<'_, Self, Model>> {
+    pub fn model(&self, i: usize) -> Option<Handle<'_, Self, F::Model>> {
         self.vis.models.get(i).map(|model| Handle {
             bsp: self,
             data: model,
@@ -1253,18 +1699,20 @@ impl Bsp {
     }
 
     #[inline]
-    pub fn models(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Model>> + Clone {
+    pub fn models(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, F::Model>> + Clone {
         self.vis.models().map(move |m| Handle::new(self, m.data))
     }
 
     #[inline]
-    pub fn leaves(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, Leaf>> + Clone {
+    pub fn leaves(&self) -> impl ExactSizeIterator<Item = Handle<'_, Self, F::Leaf>> + Clone {
         self.vis.leaves.iter().map(move |leaf| Handle {
             bsp: self,
             data: leaf,
         })
     }
+}
 
+impl Bsp<Quake2> {
     #[inline]
     pub fn clusters(&self) -> impl ExactSizeIterator<Item = u16> + Clone {
         0..self.vis.visdata.cluster_offsets.len() as u16
@@ -1283,7 +1731,7 @@ pub struct BoundingSphere {
     pub radius_squared: f32,
 }
 
-impl Model {
+impl Q2Model {
     #[inline]
     pub fn bounding_sphere(&self) -> BoundingSphere {
         let center = [
@@ -1306,9 +1754,9 @@ impl Model {
     }
 }
 
-impl<'a> Handle<'a, Bsp, Model> {
+impl<'a> Handle<'a, Bsp, Q2Model> {
     #[inline]
-    pub fn leaves(self) -> Option<impl Iterator<Item = Handle<'a, Bsp, Leaf>> + Clone + 'a> {
+    pub fn leaves(self) -> Option<impl Iterator<Item = Handle<'a, Bsp, Q2Leaf>> + Clone + 'a> {
         use itertools::Either;
 
         let mut stack = vec![Either::Left(self.bsp.node(self.headnode as usize)?)];
@@ -1347,7 +1795,7 @@ impl<'a> Handle<'a, Bsp, Model> {
     }
 }
 
-impl<'a> Handle<'a, Vis, Model> {
+impl<'a> Handle<'a, Vis, Q2Model> {
     #[inline]
     pub fn cluster_at<C, I: Into<V3<C>>>(self, point: I) -> Option<u16>
     where
@@ -1364,7 +1812,7 @@ impl<'a> Handle<'a, Vis, Model> {
     }
 }
 
-impl<'a> Handle<'a, Bsp, Texture> {
+impl<'a> Handle<'a, Bsp, Q2Texture> {
     #[inline]
     pub fn next_frame(self) -> Option<Self> {
         u32::try_from(self.next)
@@ -1373,29 +1821,32 @@ impl<'a> Handle<'a, Bsp, Texture> {
     }
 
     #[inline]
-    pub fn frames(self) -> impl Iterator<Item = Handle<'a, Bsp, Texture>> {
+    pub fn frames(self) -> impl Iterator<Item = Handle<'a, Bsp, Q2Texture>> {
         let mut texture = Some(self);
         let this = self;
 
         iter::from_fn(move || {
             let out = texture?;
 
-            texture = out.next_frame();
+            texture = match out.next_frame() {
+                None => None,
+                Some(tex) if tex.data == this.data => None,
+                Some(other) => Some(other),
+            };
 
             Some(out)
         })
-        .take_while(move |&t| t != this)
     }
 }
 
 impl<'a> Handle<'a, Bsp, Face> {
     #[inline]
-    pub fn texture(self) -> Option<Handle<'a, Bsp, Texture>> {
+    pub fn texture(self) -> Option<Handle<'a, Bsp, Q2Texture>> {
         self.bsp.texture(self.texture as _)
     }
 
     #[inline]
-    pub fn textures(self) -> impl Iterator<Item = Handle<'a, Bsp, Texture>> {
+    pub fn textures(self) -> impl Iterator<Item = Handle<'a, Bsp, Q2Texture>> {
         self.texture().into_iter().flat_map(|tex| tex.frames())
     }
 
@@ -1405,8 +1856,8 @@ impl<'a> Handle<'a, Bsp, Face> {
 
         Some(self.vertices().map(move |vert| {
             (
-                vert.dot(&texture.axis_u) + texture.offset_u,
-                vert.dot(&texture.axis_v) + texture.offset_v,
+                vert.dot(&texture.offsets.axis_u) + texture.offsets.offset_u,
+                vert.dot(&texture.offsets.axis_v) + texture.offsets.offset_v,
             )
         }))
     }
@@ -1532,7 +1983,7 @@ where
     }
 }
 
-impl<'a> Handle<'a, Bsp, Leaf> {
+impl<'a> Handle<'a, Bsp, Q2Leaf> {
     #[inline]
     pub fn leaf_faces(self) -> impl ExactSizeIterator<Item = Handle<'a, Bsp, LeafFace>> + Clone {
         let start = self.leaf_face as usize;

@@ -88,6 +88,12 @@ impl LoadAsset for &'_ SkyboxAsset<'_> {
                     rect.x as f32 + (((coord[0] + 1.) / 2.) * tex_w).round(),
                     rect.y as f32 + ((1. - (coord[1] + 1.) / 2.) * tex_h).round(),
                 ],
+                atlas_texture: [
+                    rect.x as u32,
+                    rect.y as u32,
+                    rect.width as u32,
+                    rect.height as u32,
+                ],
             }
         });
 

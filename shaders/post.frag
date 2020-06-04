@@ -8,7 +8,6 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform texture2D t_Diffuse;
 layout(set = 0, binding = 1) uniform sampler s_Color;
 layout(set = 0, binding = 2) uniform Locals {
-    vec4 _unused;
     float inv_gamma;
     float intensity;
 };

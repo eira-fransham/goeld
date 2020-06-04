@@ -177,6 +177,7 @@ pub struct RenderMesh<I> {
 pub enum PipelineDesc {
     Skybox,
     World,
+    Models,
 }
 
 pub trait Render {
@@ -203,6 +204,7 @@ pub struct Renderer {
     linear_sampler: wgpu::Sampler,
     world_pipeline: Pipeline,
     skybox_pipeline: Pipeline,
+    model_pipeline: Pipeline,
     post_pipeline: Option<Pipeline>,
     msaa_factor: NonZeroU8,
     msaa_buffer: Option<(NonZeroU8, wgpu::TextureView)>,
@@ -241,13 +243,16 @@ pub struct TexturedVertex {
     /// skyboxes) this is the absolute coord. We might change this to be consistent in the future,
     /// especially if we want to support wrapping everywhere.
     pub tex_coord: [f32; 2],
+    /// The coordinates and size of the texture in the atlas, so we can do wrapping
+    /// in the shader while still using our fake megatexture thing.
+    pub atlas_texture: [u32; 4],
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorldVertex {
-    /// The coordinates and size of the texture in the atlas, so we can do wrapping
-    /// in the shader while still using our fake megatexture thing.
-    pub atlas_texture: [f32; 4],
+    /// For animated textures (TODO: We can split this out even further since 99% of faces have
+    /// non-animated textures)
+    pub count: u32,
     pub lightmap_coord: [f32; 2],
     pub lightmap_width: f32,
     pub lightmap_count: u32,
@@ -318,6 +323,7 @@ impl DoRender for RenderContext<'_> {
             let pipeline = match T::PIPELINE {
                 PipelineDesc::Skybox => &self.renderer.skybox_pipeline,
                 PipelineDesc::World => &self.renderer.world_pipeline,
+                PipelineDesc::Models => &self.renderer.model_pipeline,
             };
 
             self.rpass.set_pipeline(&pipeline.pipeline);
@@ -368,14 +374,14 @@ struct Matrices {
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct FragmentUniforms {
-    /// (width, height) of the diffuse atlas
-    diffuse_atlas_size: [f32; 2],
-    /// (width, height) of the lightmap atlas
-    lightmap_atlas_size: [f32; 2],
     /// The amount to exponentiate the output colour by
     inv_gamma: f32,
     /// The amount to multiply the output colour by
     intensity: f32,
+    /// To get the x coord of the current texture, do `texture.x + (animation frame % count) * texture.width`
+    animation_frame: u32,
+    /// So that animations know how much to offset by
+    atlas_padding: u32,
 }
 
 unsafe impl Pod for Matrices {}
@@ -424,13 +430,10 @@ impl Renderer {
         });
 
         let fragment_uniforms = FragmentUniforms {
-            diffuse_atlas_size: [cache.diffuse.width() as f32, cache.diffuse.height() as f32],
-            lightmap_atlas_size: [
-                cache.lightmap.width() as f32,
-                cache.lightmap.height() as f32,
-            ],
             inv_gamma: gamma.recip(),
             intensity,
+            animation_frame: 0,
+            atlas_padding: 1,
         };
         let fragment_uniforms_buffer = device.create_buffer_with_data(
             bytemuck::cast_slice(&[fragment_uniforms]),
@@ -457,31 +460,47 @@ impl Renderer {
             1,
         );
 
+        let model_pipeline = self::pipelines::models::build(
+            device,
+            &diffuse_atlas_view,
+            &nearest_sampler,
+            &matrices_buffer,
+            &fragment_uniforms_buffer,
+            1,
+        );
+
+        let atlas_texture = [0, 0, 1, 1];
         let msaa_verts = device.create_buffer_with_data(
             bytemuck::cast_slice(&[
                 TexturedVertex {
                     pos: [-1., -1., 0., 1.],
                     tex_coord: [0., 1.],
+                    atlas_texture,
                 },
                 TexturedVertex {
                     pos: [1., -1., 0., 1.],
                     tex_coord: [1., 1.],
+                    atlas_texture,
                 },
                 TexturedVertex {
                     pos: [1., 1., 0., 1.],
                     tex_coord: [1., 0.],
+                    atlas_texture,
                 },
                 TexturedVertex {
                     pos: [1., 1., 0., 1.],
                     tex_coord: [1., 0.],
+                    atlas_texture,
                 },
                 TexturedVertex {
                     pos: [-1., 1., 0., 1.],
                     tex_coord: [0., 0.],
+                    atlas_texture,
                 },
                 TexturedVertex {
                     pos: [-1., -1., 0., 1.],
                     tex_coord: [0., 1.],
+                    atlas_texture,
                 },
             ]),
             wgpu::BufferUsage::VERTEX,
@@ -495,6 +514,7 @@ impl Renderer {
             fragment_uniforms_buffer,
             world_pipeline,
             skybox_pipeline,
+            model_pipeline,
             post_pipeline: None,
             nearest_sampler,
             linear_sampler,
@@ -524,6 +544,7 @@ impl Renderer {
             != &self.msaa_factor
         {
             self.msaa_buffer = None;
+            self.depth_buffer = None;
         }
     }
 
@@ -548,7 +569,7 @@ impl Renderer {
                 depth: 1,
             },
             mip_level_count: 1,
-            sample_count: 4,
+            sample_count: 2 * self.msaa_factor() as u32,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
@@ -574,7 +595,7 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: self.msaa_factor.get() as u32,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
+                format: self::pipelines::postprocess::POST_BUFFER_FORMAT,
                 usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
             });
 
@@ -603,12 +624,20 @@ impl Renderer {
                 self.msaa_factor.get() as u32,
             );
 
+            self.model_pipeline = self::pipelines::models::build(
+                device,
+                &diffuse_atlas_view,
+                &self.nearest_sampler,
+                &self.matrices_buffer,
+                &self.fragment_uniforms_buffer,
+                self.msaa_factor.get() as u32,
+            );
+
             self.post_pipeline = Some(self::pipelines::postprocess::build(
                 device,
                 self.msaa_buffer.as_ref().map(|(_, buf)| buf).unwrap(),
                 &self.linear_sampler,
                 &self.fragment_uniforms_buffer,
-                self.msaa_factor.get() as u32,
             ));
         }
     }
@@ -619,6 +648,11 @@ impl Renderer {
 
     pub fn cache(&self) -> &RenderCache {
         &self.cache
+    }
+
+    pub fn advance_frame(&mut self) {
+        self.fragment_uniforms.animation_frame += 1;
+        self.fragment_uniforms_dirty = true;
     }
 
     pub fn render<F>(

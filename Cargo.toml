@@ -20,7 +20,7 @@ rect_packer = "0.2"
 image = "0.23"
 memoffset = "0.5"
 anyhow = "1"
-open-asset-importer = "0.1.1"
+open-asset-importer = "0.2"
 jemallocator = { version = "0.3", optional = true }
 
 [build-dependencies]

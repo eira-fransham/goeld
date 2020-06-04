@@ -23,6 +23,10 @@ impl<T> BufferCache<T> {
         }
     }
 
+    pub fn len(&self) -> u64 {
+        self.unwritten.len() as u64 + self.buffer_len
+    }
+
     pub fn append_many<
         Int: TryFrom<u64>,
         O: FromIterator<Result<Range<Int>, <Int as TryFrom<u64>>::Error>>,
@@ -32,15 +36,15 @@ impl<T> BufferCache<T> {
         &mut self,
         vals: Outer,
     ) -> (Range<u64>, O) {
-        let start = self.unwritten.len() as u64 + self.buffer_len;
+        let start = self.len();
         let out = O::from_iter(vals.into_iter().map(|inner| {
-            let start = self.unwritten.len() as u64 + self.buffer_len;
+            let start = self.len();
             self.unwritten.extend(inner);
-            let end = self.unwritten.len() as u64 + self.buffer_len;
+            let end = self.len();
 
             Ok(Int::try_from(start)?..Int::try_from(end)?)
         }));
-        let end = self.unwritten.len() as u64 + self.buffer_len;
+        let end = self.len();
 
         (start..end, out)
     }

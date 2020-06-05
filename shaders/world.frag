@@ -21,6 +21,8 @@ layout(binding = 5) uniform Locals {
     uint atlasPadding;
 };
 
+// TODO: We don't use this right now, multi-sampling doesn't work on my
+//       CPU's integrated graphics so I get aliasing no matter what.
 vec4 antialiasGet(texture2D src, sampler smplr, vec2 uv) {
     vec2 size = textureSize(sampler2D(src, smplr), 0);
     vec2 puv = uv*size;
@@ -32,44 +34,51 @@ vec4 antialiasGet(texture2D src, sampler smplr, vec2 uv) {
     return texture(sampler2D(src, smplr), nnn);
 }
 
+float ifLt(float a, float b, float ifTrue, float ifFalse) {
+    float lt = step(b, a);
+
+    return ifFalse * lt + ifTrue * (1 - lt);
+}
+
 void main() {
     vec2 offset = vec2(
-        v_TexCoord.x < 0 
-            ? mod(v_Tex.z - mod(-v_TexCoord.x, v_Tex.z), v_Tex.z)
-            : mod(v_TexCoord.x, v_Tex.z),
-        v_TexCoord.y < 0 
-            ? mod(v_Tex.w - mod(-v_TexCoord.y, v_Tex.w), v_Tex.w)
-            : mod(v_TexCoord.y, v_Tex.w)
+        ifLt(
+            v_TexCoord.x, 
+            0,
+            mod(v_Tex.z - mod(-v_TexCoord.x, v_Tex.z), v_Tex.z),
+            mod(v_TexCoord.x, v_Tex.z)
+        ),
+        ifLt(
+            v_TexCoord.y, 
+            0,
+            mod(v_Tex.w - mod(-v_TexCoord.y, v_Tex.w), v_Tex.w),
+            mod(v_TexCoord.y, v_Tex.w)
+        )
     );
 
     vec4 tmpLight = vec4(vec3(v_Value), 1.);
 
     ivec2 lightmapSize = textureSize(sampler2D(t_Lightmap, s_Lightmap), 0);
 
-    if (v_LightmapCount >= 1) {
-        tmpLight += texture(sampler2D(t_Lightmap, s_Lightmap), v_LightmapCoord / lightmapSize);
-    }
+    tmpLight += step(1, v_LightmapCount) * texture(
+        sampler2D(t_Lightmap, s_Lightmap),
+        v_LightmapCoord / lightmapSize
+    );
 
-    if (v_LightmapCount >= 2) {
-        tmpLight += texture(
-            sampler2D(t_Lightmap, s_Lightmap),
-            (v_LightmapCoord + vec2(v_LightmapWidth, 0)) / lightmapSize
-        );
-    }
+    tmpLight += step(2, v_LightmapCount) * texture(
+        sampler2D(t_Lightmap, s_Lightmap),
+        (v_LightmapCoord + vec2(v_LightmapWidth, 0)) / lightmapSize
+    );
 
-    if (v_LightmapCount >= 3) {
-        tmpLight += texture(
-            sampler2D(t_Lightmap, s_Lightmap),
-            (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 2) / lightmapSize
-        );
-    }
+    tmpLight += step(3, v_LightmapCount) * texture(
+        sampler2D(t_Lightmap, s_Lightmap),
+        (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 2) / lightmapSize
+    );
 
-    if (v_LightmapCount >= 4) {
-        tmpLight += texture(
-            sampler2D(t_Lightmap, s_Lightmap),
-            (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 3) / lightmapSize
-        );
-    }
+    tmpLight += step(4, v_LightmapCount) * texture(
+        sampler2D(t_Lightmap, s_Lightmap),
+        (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 3) / lightmapSize
+    );
 
     vec4 light = vec4(
         min(tmpLight.r, v_Value + 1),
@@ -78,9 +87,8 @@ void main() {
         1.0
     );
 
-    outColor = antialiasGet(
-        t_Diffuse, 
-        s_Color,
+    outColor = texture(
+        sampler2D(t_Diffuse,  s_Color),
         (offset + vec2(v_Tex.xy) + vec2((v_Tex.z + atlasPadding * 2) * (animationFrame % v_TexCount), 0)) /
             textureSize(sampler2D(t_Diffuse, s_Color), 0)
     ) * light;

@@ -78,6 +78,7 @@ pub struct RenderCache {
     pub diffuse: Atlas,
     pub lightmap: Atlas,
 
+    pub normal_vertices: BufferCache<NormalVertex>,
     pub textured_vertices: BufferCache<TexturedVertex>,
     pub world_vertices: BufferCache<WorldVertex>,
     pub indices: BufferCache<u32>,
@@ -118,6 +119,7 @@ impl RenderCache {
                 1,
             ),
 
+            normal_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
             textured_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
             world_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
             indices: BufferCache::new(wgpu::BufferUsage::INDEX),
@@ -129,6 +131,7 @@ impl RenderCache {
         self.lightmap.update(device, encoder);
         self.textured_vertices.update(device, encoder);
         self.world_vertices.update(device, encoder);
+        self.normal_vertices.update(device, encoder);
         self.indices.update(device, encoder);
     }
 }
@@ -165,11 +168,45 @@ impl<T> From<u64> for VertexOffset<T> {
 }
 
 #[derive(Clone, Default)]
-pub struct RenderMesh<I> {
-    pub offsets: (
-        Option<VertexOffset<TexturedVertex>>,
-        Option<VertexOffset<WorldVertex>>,
-    ),
+pub struct RenderOffsets(
+    pub Option<VertexOffset<TexturedVertex>>,
+    pub Option<VertexOffset<WorldVertex>>,
+    pub Option<VertexOffset<NormalVertex>>,
+);
+
+impl From<VertexOffset<TexturedVertex>> for RenderOffsets {
+    fn from(other: VertexOffset<TexturedVertex>) -> Self {
+        Self(Some(other), None, None)
+    }
+}
+
+impl From<VertexOffset<WorldVertex>> for RenderOffsets {
+    fn from(other: VertexOffset<WorldVertex>) -> Self {
+        Self(None, Some(other), None)
+    }
+}
+
+impl From<VertexOffset<NormalVertex>> for RenderOffsets {
+    fn from(other: VertexOffset<NormalVertex>) -> Self {
+        Self(None, None, Some(other))
+    }
+}
+
+impl From<(VertexOffset<TexturedVertex>, VertexOffset<WorldVertex>)> for RenderOffsets {
+    fn from(other: (VertexOffset<TexturedVertex>, VertexOffset<WorldVertex>)) -> Self {
+        Self(Some(other.0), Some(other.1), None)
+    }
+}
+
+impl From<(VertexOffset<TexturedVertex>, VertexOffset<NormalVertex>)> for RenderOffsets {
+    fn from(other: (VertexOffset<TexturedVertex>, VertexOffset<NormalVertex>)) -> Self {
+        Self(Some(other.0), None, Some(other.1))
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RenderMesh<O, I> {
+    pub offsets: O,
     pub indices: I,
 }
 
@@ -182,9 +219,10 @@ pub enum PipelineDesc {
 
 pub trait Render {
     type Indices: Iterator<Item = Range<u32>>;
+    type Offsets: Into<RenderOffsets>;
     const PIPELINE: PipelineDesc;
 
-    fn indices(self, ctx: &RenderContext<'_>) -> RenderMesh<Self::Indices>;
+    fn indices(self, ctx: &RenderContext<'_>) -> RenderMesh<Self::Offsets, Self::Indices>;
 }
 
 pub trait DoRender {
@@ -236,6 +274,14 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 );
 
 #[derive(Debug, Clone, Copy)]
+pub struct NormalVertex {
+    pub normal: [f32; 3],
+}
+
+unsafe impl Pod for NormalVertex {}
+unsafe impl Zeroable for NormalVertex {}
+
+#[derive(Debug, Clone, Copy)]
 pub struct TexturedVertex {
     pub pos: [f32; 4],
     /// For world vertices, this starts at zero and must be added to `WorldVertex::atlas_texture.xy`,
@@ -248,6 +294,9 @@ pub struct TexturedVertex {
     pub atlas_texture: [u32; 4],
 }
 
+unsafe impl Pod for TexturedVertex {}
+unsafe impl Zeroable for TexturedVertex {}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WorldVertex {
     /// For animated textures (TODO: We can split this out even further since 99% of faces have
@@ -259,8 +308,6 @@ pub struct WorldVertex {
     pub value: f32,
 }
 
-unsafe impl Pod for TexturedVertex {}
-unsafe impl Zeroable for TexturedVertex {}
 unsafe impl Pod for WorldVertex {}
 unsafe impl Zeroable for WorldVertex {}
 
@@ -309,13 +356,12 @@ impl DoRender for RenderContext<'_> {
             }
         }
 
-        let RenderMesh {
-            offsets: (tex_o, world_o),
-            indices,
-        } = to_render.indices(&self);
+        let RenderMesh { offsets, indices } = to_render.indices(&self);
         let ranges = MergeRanges {
             ranges: indices.peekable(),
         };
+
+        let RenderOffsets(tex_o, world_o, norm_o) = offsets.into();
 
         if self.cur_pipeline != Some(T::PIPELINE) {
             self.cur_pipeline = Some(T::PIPELINE);
@@ -344,6 +390,15 @@ impl DoRender for RenderContext<'_> {
                 self.rpass.set_vertex_buffer(
                     1,
                     verts.slice(world_o.id * mem::size_of::<WorldVertex>() as u64..),
+                );
+            } else {
+                return;
+            }
+        } else if let Some(norm_o) = norm_o {
+            if let Some(verts) = &*self.renderer.cache().normal_vertices {
+                self.rpass.set_vertex_buffer(
+                    1,
+                    verts.slice(norm_o.id * mem::size_of::<NormalVertex>() as u64..),
                 );
             } else {
                 return;
@@ -463,7 +518,7 @@ impl Renderer {
         let model_pipeline = self::pipelines::models::build(
             device,
             &diffuse_atlas_view,
-            &nearest_sampler,
+            &linear_sampler,
             &matrices_buffer,
             &fragment_uniforms_buffer,
             1,
@@ -627,7 +682,7 @@ impl Renderer {
             self.model_pipeline = self::pipelines::models::build(
                 device,
                 &diffuse_atlas_view,
-                &self.nearest_sampler,
+                &self.linear_sampler,
                 &self.matrices_buffer,
                 &self.fragment_uniforms_buffer,
                 self.msaa_factor.get() as u32,

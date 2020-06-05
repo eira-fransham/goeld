@@ -1,7 +1,9 @@
 use crate::{
     cache::Cache,
     loader::{Load, LoadAsset, Loader},
-    render::{PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex},
+    render::{
+        PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex, VertexOffset,
+    },
 };
 use rect_packer::Rect;
 use std::{borrow::Cow, iter, ops::Range, path::Path};
@@ -117,11 +119,12 @@ impl LoadAsset for &'_ SkyboxAsset<'_> {
 
 impl<'a> Render for &'a Skybox {
     type Indices = iter::Once<Range<u32>>;
+    type Offsets = VertexOffset<TexturedVertex>;
     const PIPELINE: PipelineDesc = PipelineDesc::Skybox;
 
-    fn indices(self, _ctx: &RenderContext<'_>) -> RenderMesh<Self::Indices> {
+    fn indices(self, _ctx: &RenderContext<'_>) -> RenderMesh<Self::Offsets, Self::Indices> {
         RenderMesh {
-            offsets: (Some(self.vert_offset.into()), None),
+            offsets: self.vert_offset.into(),
             indices: iter::once(self.index_range.clone()),
         }
     }

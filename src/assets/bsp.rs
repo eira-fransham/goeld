@@ -2,7 +2,8 @@ use crate::{
     cache::{Atlas, Cache},
     loader::{Load, LoadAsset, Loader},
     render::{
-        PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex, WorldVertex,
+        PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex, VertexOffset,
+        WorldVertex,
     },
 };
 use cgmath::{InnerSpace, Matrix, Point3};
@@ -194,6 +195,7 @@ impl LoadAsset for BspAsset {
             textured_vertices,
             world_vertices,
             indices,
+            ..
         } = cache;
 
         let bsp_ref = &bsp;
@@ -396,10 +398,11 @@ mod hack {
 
 impl<'a> Render for &'a mut World {
     type Indices = WorldIndexIter<'a>;
+    type Offsets = (VertexOffset<TexturedVertex>, VertexOffset<WorldVertex>);
     const PIPELINE: PipelineDesc = PipelineDesc::World;
 
     #[inline]
-    fn indices(self, ctx: &RenderContext) -> RenderMesh<Self::Indices> {
+    fn indices(self, ctx: &RenderContext) -> RenderMesh<Self::Offsets, Self::Indices> {
         let pos: [f32; 3] = ctx.camera.position.into();
         let cluster_meta = &self.cluster_meta;
         let vis = &self.vis;
@@ -419,10 +422,7 @@ impl<'a> Render for &'a mut World {
         let clusters = hack::impl_trait_hack(vis, cluster);
 
         RenderMesh {
-            offsets: (
-                Some(self.tex_vert_offset.into()),
-                Some(self.world_vert_offset.into()),
-            ),
+            offsets: (self.tex_vert_offset.into(), self.world_vert_offset.into()),
             indices: WorldIndexIter {
                 clusters,
                 cluster_meta,

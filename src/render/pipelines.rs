@@ -559,6 +559,7 @@ pub mod models {
         diffuse_sampler: &wgpu::Sampler,
         matrices: &wgpu::Buffer,
         fragment_uniforms: &wgpu::Buffer,
+        lights: &wgpu::Buffer,
         sample_count: u32,
     ) -> Pipeline {
         let vs_module = device
@@ -592,6 +593,11 @@ pub mod models {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::UniformBuffer { dynamic: false },
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::UniformBuffer { dynamic: false },
                 },
@@ -695,6 +701,10 @@ pub mod models {
                 wgpu::Binding {
                     binding: 3,
                     resource: wgpu::BindingResource::Buffer(fragment_uniforms.slice(..)),
+                },
+                wgpu::Binding {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(lights.slice(..)),
                 },
             ],
         });

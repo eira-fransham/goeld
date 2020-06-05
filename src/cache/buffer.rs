@@ -18,7 +18,7 @@ impl<T> BufferCache<T> {
         Self {
             unwritten: Vec::new(),
             buffer: None,
-            buffer_usage,
+            buffer_usage: buffer_usage | wgpu::BufferUsage::COPY_SRC,
             buffer_len: 0,
         }
     }

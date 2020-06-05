@@ -1,4 +1,4 @@
-use crate::cache::{Atlas, BufferCache, CacheCommon};
+use crate::cache::{Atlas, BufferCache, Cache, CacheCommon};
 use bytemuck::{Pod, Zeroable};
 use std::{iter, mem, num::NonZeroU8, ops::Range};
 
@@ -217,6 +217,17 @@ pub enum PipelineDesc {
     Models,
 }
 
+#[derive(PartialEq, Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Light {
+    pub position: [f32; 4],
+    /// R, G, B
+    pub color: [f32; 4],
+}
+
+unsafe impl Pod for Light {}
+unsafe impl Zeroable for Light {}
+
 pub trait Render {
     type Indices: Iterator<Item = Range<u32>>;
     type Offsets: Into<RenderOffsets>;
@@ -225,15 +236,21 @@ pub trait Render {
     fn indices(self, ctx: &RenderContext<'_>) -> RenderMesh<Self::Offsets, Self::Indices>;
 }
 
-pub trait DoRender {
-    fn render<T>(&mut self, to_render: T)
-    where
-        T: Render;
+pub trait HasLights {
+    type Lights: Iterator<Item = Light>;
+
+    fn dirty(&self) -> bool {
+        true
+    }
+
+    fn lights(self) -> Self::Lights;
 }
 
 pub struct Renderer {
     cache: RenderCache,
     matrices_buffer: wgpu::Buffer,
+    lights_buffer: wgpu::Buffer,
+    lights: Vec<Light>,
     fragment_uniforms: FragmentUniforms,
     fragment_uniforms_dirty: bool,
     fragment_uniforms_buffer: wgpu::Buffer,
@@ -318,12 +335,13 @@ unsafe impl Zeroable for WorldVertex {}
 pub struct RenderContext<'a> {
     pub renderer: &'a Renderer,
     pub camera: &'a Camera,
+
     cur_pipeline: Option<PipelineDesc>,
     rpass: wgpu::RenderPass<'a>,
 }
 
-impl DoRender for RenderContext<'_> {
-    fn render<T>(&mut self, to_render: T)
+impl RenderContext<'_> {
+    pub fn render<T>(&mut self, to_render: T)
     where
         T: Render,
     {
@@ -437,6 +455,9 @@ struct FragmentUniforms {
     animation_frame: u32,
     /// So that animations know how much to offset by
     atlas_padding: u32,
+    /// For lighting the models (TODO: This doesn't take into account lights that are visible to the
+    /// model but not to the camera)
+    num_lights: u32,
 }
 
 unsafe impl Pod for Matrices {}
@@ -444,6 +465,8 @@ unsafe impl Zeroable for Matrices {}
 
 unsafe impl Pod for FragmentUniforms {}
 unsafe impl Zeroable for FragmentUniforms {}
+
+const MAX_LIGHTS: usize = 4;
 
 impl Renderer {
     pub fn init(device: &wgpu::Device, out_size: (u32, u32), gamma: f32, intensity: f32) -> Self {
@@ -489,6 +512,7 @@ impl Renderer {
             intensity,
             animation_frame: 0,
             atlas_padding: 1,
+            num_lights: 0,
         };
         let fragment_uniforms_buffer = device.create_buffer_with_data(
             bytemuck::cast_slice(&[fragment_uniforms]),
@@ -515,12 +539,19 @@ impl Renderer {
             1,
         );
 
+        let lights_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (MAX_LIGHTS * mem::size_of::<Light>()) as u64,
+            usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+        });
+
         let model_pipeline = self::pipelines::models::build(
             device,
             &diffuse_atlas_view,
             &linear_sampler,
             &matrices_buffer,
             &fragment_uniforms_buffer,
+            &lights_buffer,
             1,
         );
 
@@ -570,6 +601,8 @@ impl Renderer {
             world_pipeline,
             skybox_pipeline,
             model_pipeline,
+            lights_buffer,
+            lights: vec![],
             post_pipeline: None,
             nearest_sampler,
             linear_sampler,
@@ -685,6 +718,7 @@ impl Renderer {
                 &self.linear_sampler,
                 &self.matrices_buffer,
                 &self.fragment_uniforms_buffer,
+                &self.lights_buffer,
                 self.msaa_factor.get() as u32,
             );
 
@@ -710,6 +744,18 @@ impl Renderer {
         self.fragment_uniforms_dirty = true;
     }
 
+    pub fn set_lights<T>(&mut self, lights: T)
+    where
+        T: HasLights,
+    {
+        if lights.dirty() {
+            self.lights.clear();
+            self.lights.extend(lights.lights().take(MAX_LIGHTS));
+            self.fragment_uniforms.num_lights = self.lights.len() as _;
+            self.fragment_uniforms_dirty = true;
+        }
+    }
+
     pub fn render<F>(
         &mut self,
         device: &wgpu::Device,
@@ -727,6 +773,15 @@ impl Renderer {
             label: Some("render"),
         });
         self.cache.update(device, &mut encoder);
+
+        if !self.lights.is_empty() {
+            queue.write_buffer(
+                &self.lights_buffer,
+                0,
+                bytemuck::cast_slice(&self.lights[..MAX_LIGHTS.min(self.lights.len())]),
+            );
+            self.lights.clear();
+        }
 
         let indices = if let Some(i) = self.cache.indices.as_ref() {
             i

@@ -23,7 +23,7 @@ mod render;
 
 use assets::{BspAsset, MdlAsset, SkyboxAsset};
 use loader::{Load, LoadAsset, Loader};
-use render::{Camera, DoRender, Renderer};
+use render::{Camera, Renderer};
 
 async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window) {
     let size = window.inner_size();
@@ -354,6 +354,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 Ok(frame) => {
                     consecutive_timeouts = 0;
 
+                    renderer.set_lights(&bsp);
+
                     queue.submit(renderer.render(
                         &device,
                         &camera,
@@ -363,7 +365,9 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                             if let Some(sky) = &sky {
                                 ctx.render(sky);
                             }
+
                             ctx.render(&mut bsp);
+
                             ctx.render(&model);
                         },
                     ))

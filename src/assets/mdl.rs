@@ -2,11 +2,10 @@ use crate::{
     cache::Cache,
     loader::{LoadAsset, Loader},
     render::{
-        NormalVertex, PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex,
-        VertexOffset,
+        Light, NormalVertex, PipelineDesc, Render, RenderCache, RenderContext, RenderMesh,
+        TexturedVertex, VertexOffset,
     },
 };
-use cgmath::SquareMatrix;
 use fnv::FnvHashMap as HashMap;
 use image::ImageBuffer;
 use std::{borrow::Cow, collections::hash_map::Entry, ops::Range};
@@ -168,7 +167,8 @@ impl LoadAsset for MdlAsset<'_> {
                 &materials,
                 cache,
                 &self.0,
-                cgmath::Matrix4::<f32>::identity(),
+                cgmath::Matrix4::<f32>::from_angle_z(cgmath::Deg(90.))
+                    * cgmath::Matrix4::<f32>::from_angle_y(cgmath::Deg(-90.)),
                 node,
             );
         }
@@ -186,7 +186,7 @@ impl<'a> Render for &'a Model {
     type Offsets = (VertexOffset<TexturedVertex>, VertexOffset<NormalVertex>);
     const PIPELINE: PipelineDesc = PipelineDesc::Models;
 
-    fn indices(self, ctx: &RenderContext<'_>) -> RenderMesh<Self::Offsets, Self::Indices> {
+    fn indices(self, _ctx: &RenderContext<'_>) -> RenderMesh<Self::Offsets, Self::Indices> {
         RenderMesh {
             offsets: (self.vert_offset.into(), self.norm_offset.into()),
             indices: self.index_ranges.iter().cloned(),

@@ -2,8 +2,8 @@ use crate::{
     cache::{Atlas, Cache},
     loader::{Load, LoadAsset, Loader},
     render::{
-        PipelineDesc, Render, RenderCache, RenderContext, RenderMesh, TexturedVertex, VertexOffset,
-        WorldVertex,
+        HasLights, Light, PipelineDesc, Render, RenderCache, RenderContext, RenderMesh,
+        TexturedVertex, VertexOffset, WorldVertex,
     },
 };
 use cgmath::{InnerSpace, Matrix, Point3};
@@ -27,6 +27,8 @@ pub struct World {
     // Key is `(model, cluster)`
     cluster_meta: Vec<ClusterMeta>,
     model_ranges: Vec<Range<u32>>,
+
+    cluster_lights: HashMap<u16, Vec<Light>>,
 }
 
 #[inline]
@@ -174,6 +176,41 @@ impl LoadAsset for BspAsset {
 
         let mut buf = Vec::new();
         let Self(bsp) = self;
+
+        let lights = bsp
+            .entities
+            .iter()
+            .filter(|ent| ent.properties().any(|kv| kv == ("classname", "light")))
+            .filter_map(|ent| ent.properties().find(|&(key, _)| key == "origin"))
+            .map(|(_, origin)| {
+                let pos = origin.find(' ').unwrap();
+                let x = origin[..pos].parse::<f32>().unwrap();
+                let origin = &origin[pos + 1..];
+
+                let pos = origin.find(' ').unwrap();
+                let y = origin[..pos].parse::<f32>().unwrap();
+                let origin = &origin[pos + 1..];
+
+                let z = origin.parse::<f32>().unwrap();
+
+                [x, y, z]
+            })
+            .collect::<Vec<_>>();
+
+        let mut cluster_lights = HashMap::<u16, Vec<Light>>::with_hasher(Default::default());
+
+        for light in lights {
+            let cluster = bsp
+                .vis
+                .cluster_at::<bsp::XEastYSouthZUp, _>(bsp.vis.root_node().unwrap(), light);
+
+            if let Some(cluster) = cluster {
+                cluster_lights.entry(cluster).or_default().push(Light {
+                    position: [light[0], light[1], light[2], 0.],
+                    color: [1., 1., 1., 1.].into(),
+                });
+            }
+        }
 
         let missing = cache.diffuse.append(
             image::load(
@@ -334,6 +371,7 @@ impl LoadAsset for BspAsset {
             world_vert_offset,
             cluster_meta,
             model_ranges,
+            cluster_lights,
             last_cluster: None,
         })
     }
@@ -431,5 +469,38 @@ impl<'a> Render for &'a mut World {
                 clipper,
             },
         }
+    }
+}
+
+pub struct LightIter<'a> {
+    inner: hack::ImplTraitHack<'a>,
+    this: &'a World,
+}
+
+impl<'a> Iterator for LightIter<'a> {
+    type Item = &'a [Light];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(
+            self.this
+                .cluster_lights
+                .get(&self.inner.next()?)
+                .map(|v| &v[..])
+                .unwrap_or(&[]),
+        )
+    }
+}
+
+impl<'a> HasLights for &'a World {
+    type Lights = std::iter::Cloned<std::iter::Flatten<LightIter<'a>>>;
+
+    #[inline]
+    fn lights(self) -> Self::Lights {
+        let iter = LightIter {
+            inner: hack::impl_trait_hack(&self.vis, self.last_cluster),
+            this: self,
+        };
+
+        iter.flatten().cloned()
     }
 }

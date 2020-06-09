@@ -17,7 +17,7 @@ float luminance(vec3 color) {
     const float GAmount = 0.7152;
     const float BAmount = 0.0722;
 
-    return RAmount * color.r + GAmount * color.g + BAmount * color.b;
+    return dot(color, vec3(RAmount, GAmount, BAmount));
 }
 
 vec3 applyLuminance(vec3 color, float lum) {

@@ -22,7 +22,9 @@ impl LoadAsset for MdlAsset<'_> {
     type Asset = Model;
 
     #[inline]
-    fn load(self, _loader: &Loader, cache: &mut RenderCache) -> anyhow::Result<Self::Asset> {
+    fn load(self, loader: &Loader, cache: &mut RenderCache) -> anyhow::Result<Self::Asset> {
+        use crate::loader::Load;
+
         let mut textures_by_name =
             HashMap::with_capacity_and_hasher(self.0.num_textures() as usize, Default::default());
 
@@ -52,6 +54,8 @@ impl LoadAsset for MdlAsset<'_> {
             }
         }
 
+        let loader = loader.textures();
+
         let materials = self
             .0
             .materials()
@@ -60,10 +64,31 @@ impl LoadAsset for MdlAsset<'_> {
 
                 if let Some(first) = tex.textures.next() {
                     if true || tex.textures.len() == 0 {
+                        // TODO: Handle the "invert" flag
                         if first.blend_op == assimp::BlendOp::Replace {
                             match textures_by_name.entry(first.path.to_string().into()) {
                                 Entry::Occupied(entry) => (first.channel, entry.get().clone()),
-                                _ => unimplemented!(),
+                                Entry::Vacant(entry) => {
+                                    use std::path::Path;
+
+                                    let (file, path) = loader
+                                        .load(Path::new(&first.path[..]).into())
+                                        .unwrap_or_else(|e| {
+                                            panic!("Could not find {:?}: {:?}", &first.path, e)
+                                        });
+
+                                    let img = image::load(
+                                        std::io::BufReader::new(file),
+                                        image::ImageFormat::from_path(dbg!(&path)).unwrap(),
+                                    )
+                                    .unwrap();
+
+                                    let appended = cache.diffuse.append(img);
+
+                                    let out = entry.insert(appended).clone();
+
+                                    (first.channel, out)
+                                }
                             }
                         } else {
                             unimplemented!()

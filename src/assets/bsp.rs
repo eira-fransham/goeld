@@ -22,6 +22,7 @@ struct ClusterMeta {
 pub struct World {
     vis: bsp::Vis,
     last_cluster: Option<u16>,
+    cluster_changed: bool,
     tex_vert_offset: u64,
     world_vert_offset: u64,
     // Key is `(model, cluster)`
@@ -372,6 +373,7 @@ impl LoadAsset for BspAsset {
             cluster_meta,
             model_ranges,
             cluster_lights,
+            cluster_changed: true,
             last_cluster: None,
         })
     }
@@ -452,6 +454,8 @@ impl<'a> Render for &'a mut World {
             .cluster_at::<bsp::XEastYSouthZUp, _>(pos)
             .or(self.last_cluster);
 
+        self.cluster_changed = cluster != self.last_cluster;
+
         self.last_cluster = cluster;
 
         // TODO: We should separate these somewhat so we have a way to move models around
@@ -502,5 +506,9 @@ impl<'a> HasLights for &'a World {
         };
 
         iter.flatten().cloned()
+    }
+
+    fn dirty(&self) -> bool {
+        self.cluster_changed
     }
 }

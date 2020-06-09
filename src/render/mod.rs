@@ -649,6 +649,15 @@ impl Renderer {
         self.fragment_uniforms.inv_gamma.recip()
     }
 
+    pub fn set_intensity(&mut self, intensity: f32) {
+        self.fragment_uniforms.intensity = intensity;
+        self.fragment_uniforms_dirty = true;
+    }
+
+    pub fn intensity(&self) -> f32 {
+        self.fragment_uniforms.intensity
+    }
+
     fn make_depth_tex(&self, device: &wgpu::Device) -> wgpu::TextureView {
         let depth_texture_desc = wgpu::TextureDescriptor {
             size: wgpu::Extent3d {

@@ -546,13 +546,24 @@ pub mod sky {
 /// GPU.
 pub mod models {
     use super::Pipeline;
-    use crate::render::{TexturedVertex, NormalVertex};
+    use crate::render::{NormalVertex, TexturedVertex};
     use memoffset::offset_of;
     use std::mem;
 
     const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models.vert.spv"));
     const FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models.frag.spv"));
 
+    // TODO: We should use a separate bindgroup for lights, since that way we could just set the bind
+    //       group every time we render a model to be a slice of the full light buffer instead of
+    //       transferring the lights over every frame. This would make it easier to implement a way of
+    //       lighting where for every model we find the cluster it's in and check all the lights in
+    //       the visible set of _that_ cluster, instead of the visible set of the camera cluster. Plus
+    //       it means massively reducing communication with the GPU.
+    //
+    //       The only issue is that since we can't index, we'd have to duplicate lights multiple times
+    //       in order to, for every cluster, store the lights of it and its visible set contiguously.
+    //
+    //       Maybe a job for deferred shading?
     pub fn build(
         device: &wgpu::Device,
         diffuse_atlas_view: &wgpu::TextureView,
@@ -643,38 +654,38 @@ pub mod models {
             }),
             vertex_state: wgpu::VertexStateDescriptor {
                 index_format: wgpu::IndexFormat::Uint32,
-                vertex_buffers: &[wgpu::VertexBufferDescriptor {
-                    stride: mem::size_of::<TexturedVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::InputStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
-                            offset: offset_of!(TexturedVertex, pos) as u64,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float2,
-                            offset: offset_of!(TexturedVertex, tex_coord) as u64,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
-                            offset: offset_of!(TexturedVertex, atlas_texture) as u64,
-                            shader_location: 2,
-                        },
-                    ],
-                },
-                wgpu::VertexBufferDescriptor {
-                    stride: mem::size_of::<NormalVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::InputStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttributeDescriptor {
+                vertex_buffers: &[
+                    wgpu::VertexBufferDescriptor {
+                        stride: mem::size_of::<TexturedVertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::InputStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float4,
+                                offset: offset_of!(TexturedVertex, pos) as u64,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float2,
+                                offset: offset_of!(TexturedVertex, tex_coord) as u64,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float4,
+                                offset: offset_of!(TexturedVertex, atlas_texture) as u64,
+                                shader_location: 2,
+                            },
+                        ],
+                    },
+                    wgpu::VertexBufferDescriptor {
+                        stride: mem::size_of::<NormalVertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::InputStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttributeDescriptor {
                             format: wgpu::VertexFormat::Float4,
                             offset: offset_of!(NormalVertex, normal) as u64,
                             shader_location: 3,
-                        },
-                    ],
-                }],
+                        }],
+                    },
+                ],
             },
             sample_count,
             sample_mask: !0,
@@ -728,6 +739,7 @@ pub mod postprocess {
 
     const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/post.vert.spv"));
     const FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/post.frag.spv"));
+
     pub const POST_BUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg11b10Float;
 
     pub fn build(

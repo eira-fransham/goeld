@@ -53,7 +53,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device, size.into(), 1.6, 1.4);
+    let mut renderer = Renderer::init(&device, size.into(), 1.6, 1.3);
     let mut sky = None;
     let mut camera = None;
 
@@ -320,23 +320,47 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                             ..
                         },
                     ..
-                } => match keycode {
-                    event::VirtualKeyCode::O => {
-                        renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
+                } => {
+                    const MIN_GAMMA: f32 = 0.1;
+                    const MAX_GAMMA: f32 = 8.0;
+
+                    const MIN_INTENSITY: f32 = 0.1;
+                    const MAX_INTENSITY: f32 = 20.0;
+
+                    match keycode {
+                        event::VirtualKeyCode::O => {
+                            renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
+                        }
+                        event::VirtualKeyCode::P => {
+                            renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
+                        }
+                        event::VirtualKeyCode::K => {
+                            renderer
+                                .set_gamma((renderer.gamma() - 0.05).max(MIN_GAMMA).min(MAX_GAMMA));
+                        }
+                        event::VirtualKeyCode::L => {
+                            renderer
+                                .set_gamma((renderer.gamma() + 0.05).max(MIN_GAMMA).min(MAX_GAMMA));
+                        }
+                        event::VirtualKeyCode::H => {
+                            renderer.set_intensity(
+                                (renderer.intensity() - 0.2)
+                                    .max(MIN_INTENSITY)
+                                    .min(MAX_INTENSITY),
+                            );
+                        }
+                        event::VirtualKeyCode::J => {
+                            renderer.set_intensity(
+                                (renderer.intensity() + 0.2)
+                                    .max(MIN_INTENSITY)
+                                    .min(MAX_INTENSITY),
+                            );
+                        }
+                        keycode => {
+                            keys_down.insert(keycode);
+                        }
                     }
-                    event::VirtualKeyCode::P => {
-                        renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
-                    }
-                    event::VirtualKeyCode::K => {
-                        renderer.set_gamma((renderer.gamma() - 0.05).max(0.5).min(4.0));
-                    }
-                    event::VirtualKeyCode::L => {
-                        renderer.set_gamma((renderer.gamma() + 0.05).max(0.5).min(4.0));
-                    }
-                    keycode => {
-                        keys_down.insert(keycode);
-                    }
-                },
+                }
                 WindowEvent::KeyboardInput {
                     input:
                         event::KeyboardInput {

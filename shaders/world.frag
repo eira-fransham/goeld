@@ -21,6 +21,7 @@ layout(binding = 5) uniform Locals {
     uint atlasPadding;
 };
 
+
 // TODO: We don't use this right now, multi-sampling doesn't work on my
 //       CPU's integrated graphics so I get aliasing no matter what.
 vec4 antialiasGet(texture2D src, sampler smplr, vec2 uv) {
@@ -56,35 +57,28 @@ void main() {
         )
     );
 
-    vec4 tmpLight = vec4(vec3(v_Value), 1.);
+    vec4 light = vec4(vec3(v_Value), 1.);
 
     ivec2 lightmapSize = textureSize(sampler2D(t_Lightmap, s_Lightmap), 0);
 
-    tmpLight += step(1, v_LightmapCount) * texture(
+    light += step(1, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         v_LightmapCoord / lightmapSize
     );
 
-    tmpLight += step(2, v_LightmapCount) * texture(
+    light += step(2, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         (v_LightmapCoord + vec2(v_LightmapWidth, 0)) / lightmapSize
     );
 
-    tmpLight += step(3, v_LightmapCount) * texture(
+    light += step(3, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 2) / lightmapSize
     );
 
-    tmpLight += step(4, v_LightmapCount) * texture(
+    light += step(4, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 3) / lightmapSize
-    );
-
-    vec4 light = vec4(
-        min(tmpLight.r, v_Value + 1),
-        min(tmpLight.g, v_Value + 1),
-        min(tmpLight.b, v_Value + 1), 
-        1.0
     );
 
     outColor = texture(

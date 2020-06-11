@@ -2,9 +2,70 @@ use crate::cache::{Cache, CacheCommon};
 use std::{
     convert::TryFrom,
     iter::FromIterator,
+    marker::PhantomData,
     mem,
     ops::{Deref, Range},
 };
+
+pub struct AlignedBufferCache<T> {
+    inner: BufferCache<u8>,
+    alignment: u16,
+    _marker: PhantomData<T>,
+}
+
+impl<T> Deref for AlignedBufferCache<T> {
+    type Target = Option<wgpu::Buffer>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
+
+impl<T> AlignedBufferCache<T> {
+    pub fn new(buffer_usage: wgpu::BufferUsage, alignment: u16) -> Self {
+        Self {
+            inner: BufferCache::new(buffer_usage),
+            alignment,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> CacheCommon for AlignedBufferCache<T>
+where
+    T: bytemuck::Pod,
+{
+    type Key = Range<u64>;
+
+    fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        self.inner.update(device, encoder);
+    }
+
+    fn clear(&mut self) {
+        self.inner.clear()
+    }
+}
+
+impl<T, I> Cache<I> for AlignedBufferCache<T>
+where
+    I: IntoIterator<Item = T>,
+    T: bytemuck::Pod,
+{
+    fn append(&mut self, vals: I) -> Self::Key {
+        let vals: Vec<T> = vals.into_iter().collect();
+
+        let out = self
+            .inner
+            .append(bytemuck::cast_slice(&vals[..]).iter().copied());
+        self.inner.append(
+            std::iter::repeat(0).take(
+                self.alignment as usize - (self.inner.len() % self.alignment as u64) as usize,
+            ),
+        );
+
+        out
+    }
+}
 
 pub struct BufferCache<T> {
     unwritten: Vec<T>,
@@ -114,6 +175,10 @@ where
         self.unwritten.extend(vals);
         let end = self.unwritten.len() as u64 + self.buffer_len;
 
-        start..end
+        if start == end {
+            0..0
+        } else {
+            start..end
+        }
     }
 }

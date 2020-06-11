@@ -54,7 +54,7 @@ vec3 aces(vec3 color) {
     // color = clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
     // return pow(color, vec3(invGamma));
 
-    lum = clamp((lum * (a * lum + b)) / (lum * (c * lum + d) + e), 0.0, 1.0);
+    lum = (lum * (a * lum + b)) / (lum * (c * lum + d) + e);
     lum = pow(lum, invGamma);
 
     return applyLuminance(color, lum);

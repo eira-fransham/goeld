@@ -53,7 +53,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device, size.into(), 1.6, 1.3);
+    let mut renderer = Renderer::init(&device, size.into(), 1.6, 2.0);
     let mut sky = None;
     let mut camera = None;
 
@@ -138,9 +138,9 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut bsp = BspAsset(bsp).load(&loader, renderer.cache_mut()).unwrap();
 
-    let model = MdlAsset(
+    let mut model = MdlAsset(
         model_importer
-            .read_file("data/models/chumtoad.mdl")
+            .read_file("data/models/bullsquid.mdl")
             .unwrap(),
     )
     .load(&loader, renderer.cache_mut())
@@ -163,7 +163,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
     const FPS: f64 = 60.;
     const DT: f64 = 1. / FPS;
     const ANIM_DT: f64 = 1. / 5.;
-    const DEG_PER_SEC: cgmath::Deg<f32> = cgmath::Deg(30.);
     const MOVEMENT_VEL: cgmath::Vector3<f32> = cgmath::Vector3::new(400., 0., 0.);
 
     let mut lock_mouse = false;
@@ -195,18 +194,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
             while elapsed >= update_dt {
                 for keycode in &keys_down {
                     match keycode {
-                        event::VirtualKeyCode::Up => {
-                            camera.pitch -= DEG_PER_SEC * DT as f32;
-                        }
-                        event::VirtualKeyCode::Down => {
-                            camera.pitch += DEG_PER_SEC * DT as f32;
-                        }
-                        event::VirtualKeyCode::Right => {
-                            camera.yaw -= DEG_PER_SEC * DT as f32;
-                        }
-                        event::VirtualKeyCode::Left => {
-                            camera.yaw += DEG_PER_SEC * DT as f32;
-                        }
                         event::VirtualKeyCode::W => {
                             camera.position += cgmath::Matrix3::from_angle_z(camera.yaw)
                                 * cgmath::Matrix3::from_angle_y(camera.pitch)
@@ -230,6 +217,18 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                                 cgmath::Matrix3::from_angle_z(camera.yaw - cgmath::Deg(90.))
                                     * MOVEMENT_VEL
                                     * DT as f32;
+                        }
+                        event::VirtualKeyCode::Up => {
+                            model.update_position(cgmath::Vector3::unit_x() * 100. * DT as f32);
+                        }
+                        event::VirtualKeyCode::Down => {
+                            model.update_position(-cgmath::Vector3::unit_x() * 100. * DT as f32);
+                        }
+                        event::VirtualKeyCode::Left => {
+                            model.update_position(cgmath::Vector3::unit_y() * 100. * DT as f32);
+                        }
+                        event::VirtualKeyCode::Right => {
+                            model.update_position(-cgmath::Vector3::unit_y() * 100. * DT as f32);
                         }
                         _ => {}
                     }
@@ -378,7 +377,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 Ok(frame) => {
                     consecutive_timeouts = 0;
 
-                    renderer.set_lights(&bsp);
+                    renderer.transfer_data(&queue, std::iter::once(&model));
 
                     queue.submit(renderer.render(
                         &device,
@@ -391,6 +390,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                             }
 
                             ctx.render(&mut bsp);
+
+                            ctx.set_lights(&bsp);
 
                             ctx.render(&model);
                         },

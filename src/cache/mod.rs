@@ -1,7 +1,7 @@
 mod buffer;
 mod texture;
 
-pub use buffer::BufferCache;
+pub use buffer::{AlignedBufferCache, BufferCache};
 pub use texture::Atlas;
 
 pub trait CacheCommon {

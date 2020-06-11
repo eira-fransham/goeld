@@ -1,30 +1,37 @@
 #version 450
 #pragma shader_stage(fragment)
 
-#define MAX_LIGHTS 4
+#define MAX_LIGHTS 16
+#define LIGHT_MULTIPLIER 1
+#define LIGHT_FALLOFF 1
+#define LIGHT_FALLOFF_SCALE 10
 
 layout(location = 0) in vec2 v_TexCoord;
 layout(location = 1) in flat uvec4 v_Tex;
-layout(location = 2) in vec3 v_Normal;
-layout(location = 3) in vec4 v_Position;
+layout(location = 2) in vec3 v_Pos;
+layout(location = 3) in vec3 v_Normal;
 
 layout(location = 0) out vec4 outColor;
+
+layout(set = 0, binding = 1) uniform texture2D t_Diffuse;
+layout(set = 0, binding = 2) uniform sampler s_Color;
 
 struct Light {
     vec4 pos;
     vec4 color;
 };
 
-layout(set = 0, binding = 1) uniform texture2D t_Diffuse;
-layout(set = 0, binding = 2) uniform sampler s_Color;
 layout(set = 0, binding = 3) uniform Locals {
     vec4 _unused;
-    uint numLights;
-};
-layout(set = 0, binding = 4) uniform Lights {
-    Light lights[MAX_LIGHTS];
+    float ambientLight;
 };
 
+layout(set = 0, binding = 5) uniform Lights {
+    Light lights[MAX_LIGHTS];
+};
+layout(set = 0, binding = 6) uniform NumLights {
+    uint numLights;
+};
 
 float ifLt(float a, float b, float ifTrue, float ifFalse) {
     float lt = step(b, a);
@@ -48,21 +55,22 @@ void main() {
         )
     );
 
-    vec3 shadedAmount = vec3(0.001);
+    vec3 shadedAmount = vec3(ambientLight);
 
     for (uint i = 0; i < MAX_LIGHTS; i++) {
-        float dist = length(vec3(lights[i].pos - v_Position));
-        float amt = 1.0 / (1.0 + (0.01 * dist * dist));
+        vec3 lightVec = lights[i].pos.xyz - v_Pos;
+
+        float dist = length(lightVec) * LIGHT_FALLOFF_SCALE;
+        float amt = LIGHT_MULTIPLIER * lights[i].color.a / (1.0 + pow(dist, LIGHT_FALLOFF));
+        float normAmt = max(dot(v_Normal, normalize(lightVec)), 0);
+
+        amt = ifLt(amt, 0.001, 0, amt);
 
         shadedAmount += step(i + 1, numLights) * 
             amt *
-            max(dot(v_Normal, vec3(lights[i].pos - v_Position)), 0) *
-            vec3(lights[i].color);
+            pow(normAmt, 2) *
+            lights[i].color.rgb;
     }
-
-    shadedAmount.x = min(shadedAmount.x, 1);
-    shadedAmount.y = min(shadedAmount.y, 1);
-    shadedAmount.z = min(shadedAmount.z, 1);
 
     outColor = vec4(shadedAmount, 1) * texture(
         sampler2D(t_Diffuse, s_Color), (offset + v_Tex.xy) /

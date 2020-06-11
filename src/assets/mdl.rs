@@ -2,20 +2,33 @@ use crate::{
     cache::Cache,
     loader::{LoadAsset, Loader},
     render::{
-        Light, NormalVertex, PipelineDesc, Render, RenderCache, RenderContext, RenderMesh,
-        TexturedVertex, VertexOffset,
+        ModelData, NormalVertex, PipelineDesc, Render, RenderCache, RenderMesh, TexturedVertex,
+        TransferData, VertexOffset,
     },
 };
+use cgmath::Transform;
 use fnv::FnvHashMap as HashMap;
 use image::ImageBuffer;
 use std::{borrow::Cow, collections::hash_map::Entry, ops::Range};
 
 pub struct MdlAsset<'a>(pub assimp::Scene<'a>);
 
+#[derive(Clone)]
 pub struct Model {
     vert_offset: u64,
     norm_offset: u64,
     index_ranges: Vec<Range<u32>>,
+    model_data_offset: u64,
+
+    position: cgmath::Vector3<f32>,
+    position_dirty: bool,
+}
+
+impl Model {
+    pub fn update_position(&mut self, by: cgmath::Vector3<f32>) {
+        self.position += by;
+        self.position_dirty = true;
+    }
 }
 
 impl LoadAsset for MdlAsset<'_> {
@@ -30,16 +43,10 @@ impl LoadAsset for MdlAsset<'_> {
 
         for texture in self.0.textures() {
             if let Some(data) = texture.data() {
+                // Assimp lies about the texture format for HL1 models, and it also incorrectly tags
+                // some as needing to be inverted when this isn't true. I don't know why.
                 let tex = match texture.format_hint() {
-                    Some("rgba8888") => cache.diffuse.append(
-                        ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-                            texture.width(),
-                            texture.height(),
-                            data.bytes(),
-                        )
-                        .unwrap(),
-                    ),
-                    Some("bgra8888") | None => cache.diffuse.append(
+                    Some("rgba8888") | Some("bgra8888") | None => cache.diffuse.append(
                         ImageBuffer::<image::Bgra<u8>, _>::from_raw(
                             texture.width(),
                             texture.height(),
@@ -79,7 +86,7 @@ impl LoadAsset for MdlAsset<'_> {
 
                                     let img = image::load(
                                         std::io::BufReader::new(file),
-                                        image::ImageFormat::from_path(dbg!(&path)).unwrap(),
+                                        image::ImageFormat::from_path(&path).unwrap(),
                                     )
                                     .unwrap();
 
@@ -154,10 +161,9 @@ impl LoadAsset for MdlAsset<'_> {
 
                 cache.normal_vertices.append(normals.map(move |norm| {
                     let norm: cgmath::Vector3<f32> = norm.into();
-                    let norm = transform * cgmath::Vector4::from([norm.x, norm.y, norm.z, 1.]);
-
+                    let norm = transform.transform_vector(norm);
                     NormalVertex {
-                        normal: [norm.x, norm.y, norm.z].into(),
+                        normal: norm.into(),
                     }
                 }));
 
@@ -198,23 +204,56 @@ impl LoadAsset for MdlAsset<'_> {
             );
         }
 
+        let model_data_offset = cache
+            .model_data
+            .append(std::iter::once(ModelData {
+                translation: cgmath::SquareMatrix::identity(),
+                origin: cgmath::Vector3::from([0., 0., 0.]),
+            }))
+            .start;
+
         Ok(Model {
             vert_offset,
             norm_offset,
             index_ranges,
+            model_data_offset,
+            position: [0., 0., 0.].into(),
+            position_dirty: false,
         })
+    }
+}
+
+impl TransferData for &'_ Model {
+    fn transfer_data(self) -> Option<(wgpu::BufferAddress, ModelData)> {
+        if self.position_dirty {
+            Some((
+                self.model_data_offset,
+                ModelData {
+                    translation: cgmath::Matrix4::from_translation(self.position),
+                    origin: self.position,
+                },
+            ))
+        } else {
+            None
+        }
     }
 }
 
 impl<'a> Render for &'a Model {
     type Indices = std::iter::Cloned<std::slice::Iter<'a, Range<u32>>>;
     type Offsets = (VertexOffset<TexturedVertex>, VertexOffset<NormalVertex>);
-    const PIPELINE: PipelineDesc = PipelineDesc::Models;
 
-    fn indices(self, _ctx: &RenderContext<'_>) -> RenderMesh<Self::Offsets, Self::Indices> {
+    fn indices<T: crate::render::Context>(
+        self,
+        _ctx: &T,
+    ) -> RenderMesh<Self::Offsets, Self::Indices> {
         RenderMesh {
             offsets: (self.vert_offset.into(), self.norm_offset.into()),
             indices: self.index_ranges.iter().cloned(),
+            pipeline: PipelineDesc::Models {
+                origin: self.position,
+                data_offset: self.model_data_offset,
+            },
         }
     }
 }

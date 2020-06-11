@@ -12,8 +12,12 @@ layout(binding = 0) uniform Locals {
     mat4 u_Proj;
 };
 
-void transformTexturedVertex(mat4 view, mat4 proj) {
+void transformTexturedVertex(mat4 view, mat4 proj, vec4 pos) {
     v_TexCoord = a_TexCoord;
     v_Tex = a_Tex;
-    gl_Position = proj * view * a_Pos;
+    gl_Position = proj * view * pos;
+}
+
+void transformTexturedVertex(mat4 view, mat4 proj) {
+    transformTexturedVertex(view, proj, a_Pos);
 }

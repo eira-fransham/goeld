@@ -85,5 +85,5 @@ void main() {
         sampler2D(t_Diffuse,  s_Color),
         (offset + vec2(v_Tex.xy) + vec2((v_Tex.z + atlasPadding * 2) * (animationFrame % v_TexCount), 0)) /
             textureSize(sampler2D(t_Diffuse, s_Color), 0)
-    ) * light;
+    ) * light * 4;
 }

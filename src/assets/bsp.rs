@@ -2,11 +2,11 @@ use crate::{
     cache::{Atlas, Cache},
     loader::{Load, LoadAsset, Loader},
     render::{
-        HasLights, Light, PipelineDesc, Render, RenderCache, RenderContext, RenderMesh,
-        TexturedVertex, VertexOffset, WorldVertex,
+        Light, PipelineDesc, Render, RenderCache, RenderMesh, TexturedVertex, VertexOffset,
+        World as RenderWorld, WorldVertex,
     },
 };
-use cgmath::{InnerSpace, Matrix, Point3};
+use cgmath::{InnerSpace, Point3};
 use collision::{Aabb3, Frustum, Relation};
 use fnv::FnvHashMap as HashMap;
 use std::ops::Range;
@@ -22,20 +22,19 @@ struct ClusterMeta {
 pub struct World {
     vis: bsp::Vis,
     last_cluster: Option<u16>,
-    cluster_changed: bool,
     tex_vert_offset: u64,
     world_vert_offset: u64,
     // Key is `(model, cluster)`
     cluster_meta: Vec<ClusterMeta>,
     model_ranges: Vec<Range<u32>>,
 
-    cluster_lights: HashMap<u16, Vec<Light>>,
+    cluster_lights: Vec<Range<u32>>,
 }
 
 #[inline]
 fn leaf_meshes<'a, F>(
     bsp: &'a bsp::Bsp,
-    face_start_indices: &'a mut Vec<u32>,
+    face_start_indices: &'a mut HashMap<u16, u32>,
     mut get_texture: F,
     lightmap_cache: &mut Atlas,
 ) -> (
@@ -59,10 +58,7 @@ where
     let mut tex_vertices = Vec::with_capacity(bsp.vertices.len());
     let mut world_vertices = Vec::with_capacity(bsp.vertices.len());
 
-    for face in bsp.faces() {
-        debug_assert_eq!(tex_vertices.len(), world_vertices.len());
-        face_start_indices.push(tex_vertices.len() as u32);
-
+    for (i, face) in bsp.faces().enumerate() {
         let texture = if let Some(texture) = face.texture() {
             texture
         } else {
@@ -90,6 +86,9 @@ where
         } else {
             (0, None)
         };
+
+        debug_assert_eq!(tex_vertices.len(), world_vertices.len());
+        face_start_indices.insert(i as u16, tex_vertices.len() as u32);
 
         for (tex_vert, world_vert) in face.vertices().map(|vert| {
             let (u, v) = (
@@ -130,7 +129,7 @@ where
         }
     }
 
-    let face_start_indices: &'a [u32] = &*face_start_indices;
+    let face_start_indices: &'a HashMap<_, _> = &*face_start_indices;
 
     (
         tex_vertices,
@@ -145,20 +144,23 @@ where
                     .map(move |leaf| {
                         (
                             leaf,
-                            leaf.leaf_faces().flat_map(move |leaf_face| {
-                                let start = face_start_indices[leaf_face.face as usize] as u32;
-                                let face = leaf_face.face();
+                            leaf.leaf_faces()
+                                .filter_map(move |leaf_face| {
+                                    Some((leaf_face, face_start_indices.get(&leaf_face.face)?))
+                                })
+                                .flat_map(move |(leaf_face, start)| {
+                                    let face = leaf_face.face();
 
-                                (1..face.vertices().len().saturating_sub(1))
-                                    .flat_map(|face_number| {
-                                        use std::iter::once;
+                                    (1..face.vertices().len().saturating_sub(1))
+                                        .flat_map(|face_number| {
+                                            use std::iter::once;
 
-                                        once(0)
-                                            .chain(once(face_number + 1))
-                                            .chain(once(face_number))
-                                    })
-                                    .map(move |i| i as u32 + start)
-                            }),
+                                            once(0)
+                                                .chain(once(face_number + 1))
+                                                .chain(once(face_number))
+                                        })
+                                        .map(move |i| i as u32 + start)
+                                }),
                         )
                     })
                     .map(|(leaf_handle, indices)| (leaf_handle.data, indices)),
@@ -175,15 +177,42 @@ impl LoadAsset for BspAsset {
         use image::GenericImageView;
         use std::{collections::hash_map::Entry, path::Path};
 
-        let mut buf = Vec::new();
+        let mut buf = Default::default();
         let Self(bsp) = self;
 
-        let lights = bsp
+        let RenderCache {
+            diffuse,
+            lightmap,
+            textured_vertices,
+            world_vertices,
+            indices,
+            lights,
+            ..
+        } = cache;
+
+        let bsp_lights = bsp
             .entities
             .iter()
             .filter(|ent| ent.properties().any(|kv| kv == ("classname", "light")))
-            .filter_map(|ent| ent.properties().find(|&(key, _)| key == "origin"))
-            .map(|(_, origin)| {
+            .filter_map(|ent| {
+                ent.properties()
+                    .find_map(|(key, val)| if key == "origin" { Some(val) } else { None })
+                    .map(|origin| {
+                        (
+                            origin,
+                            ent.properties()
+                                .find_map(|(key, val)| {
+                                    if key.starts_with("light") {
+                                        val.parse::<f32>().ok()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(300.0),
+                        )
+                    })
+            })
+            .map(|(origin, light)| {
                 let pos = origin.find(' ').unwrap();
                 let x = origin[..pos].parse::<f32>().unwrap();
                 let origin = &origin[pos + 1..];
@@ -194,26 +223,26 @@ impl LoadAsset for BspAsset {
 
                 let z = origin.parse::<f32>().unwrap();
 
-                [x, y, z]
+                ([x, y, z], light)
             })
             .collect::<Vec<_>>();
 
         let mut cluster_lights = HashMap::<u16, Vec<Light>>::with_hasher(Default::default());
 
-        for light in lights {
+        for (pos, intensity) in bsp_lights {
             let cluster = bsp
                 .vis
-                .cluster_at::<bsp::XEastYSouthZUp, _>(bsp.vis.root_node().unwrap(), light);
+                .cluster_at::<bsp::XEastYSouthZUp, _>(bsp.vis.root_node().unwrap(), pos);
 
             if let Some(cluster) = cluster {
                 cluster_lights.entry(cluster).or_default().push(Light {
-                    position: [light[0], light[1], light[2], 0.],
-                    color: [1., 1., 1., 1.].into(),
+                    position: [pos[0], pos[1], pos[2], 1.],
+                    color: [1., 1., 1., intensity].into(),
                 });
             }
         }
 
-        let missing = cache.diffuse.append(
+        let missing = diffuse.append(
             image::load(
                 std::io::Cursor::new(
                     &include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/missing.png"))[..],
@@ -226,15 +255,6 @@ impl LoadAsset for BspAsset {
         let loader = loader.textures();
         let mut texture_map: HashMap<_, rect_packer::Rect> =
             HashMap::with_capacity_and_hasher(bsp.textures.len(), Default::default());
-
-        let RenderCache {
-            diffuse,
-            lightmap,
-            textured_vertices,
-            world_vertices,
-            indices,
-            ..
-        } = cache;
 
         let bsp_ref = &bsp;
 
@@ -366,6 +386,37 @@ impl LoadAsset for BspAsset {
             )
         };
 
+        let cluster_lights = bsp
+            .clusters()
+            .map(|cluster| {
+                let mut bsp_lights = bsp
+                    .vis
+                    .visible_clusters(cluster, ..)
+                    .flat_map(|cluster| cluster_lights.get(&cluster))
+                    .flat_map(|lights| lights.iter().cloned())
+                    .collect::<Vec<_>>();
+                let aabb = cluster_meta[cluster as usize].aabb.clone();
+                let center = (aabb.min.to_homogeneous() + aabb.max.to_homogeneous()) / 2.;
+
+                bsp_lights.sort_unstable_by(|a, b| {
+                    let a_score = (cgmath::Vector4::from(a.position) - center).magnitude2()
+                        * cgmath::Vector4::from(a.color).magnitude2();
+                    let b_score = (cgmath::Vector4::from(b.position) - center).magnitude2()
+                        * cgmath::Vector4::from(b.color).magnitude2();
+
+                    a_score
+                        .partial_cmp(&b_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                bsp_lights.dedup();
+                bsp_lights.truncate(crate::render::MAX_LIGHTS);
+
+                let range = lights.append(bsp_lights);
+
+                range.start as u32..range.end as u32
+            })
+            .collect();
+
         Ok(World {
             vis: bsp.vis,
             tex_vert_offset,
@@ -373,7 +424,6 @@ impl LoadAsset for BspAsset {
             cluster_meta,
             model_ranges,
             cluster_lights,
-            cluster_changed: true,
             last_cluster: None,
         })
     }
@@ -439,22 +489,22 @@ mod hack {
 impl<'a> Render for &'a mut World {
     type Indices = WorldIndexIter<'a>;
     type Offsets = (VertexOffset<TexturedVertex>, VertexOffset<WorldVertex>);
-    const PIPELINE: PipelineDesc = PipelineDesc::World;
 
     #[inline]
-    fn indices(self, ctx: &RenderContext) -> RenderMesh<Self::Offsets, Self::Indices> {
-        let pos: [f32; 3] = ctx.camera.position.into();
+    fn indices<T: crate::render::Context>(
+        self,
+        ctx: &T,
+    ) -> RenderMesh<Self::Offsets, Self::Indices> {
+        let pos: [f32; 3] = ctx.camera().position.into();
         let cluster_meta = &self.cluster_meta;
         let vis = &self.vis;
-        let clipper = Frustum::<f32>::from_matrix4(ctx.camera.matrix()).unwrap();
+        let clipper = Frustum::<f32>::from_matrix4(ctx.camera().matrix()).unwrap();
 
         let cluster = vis
             .model(0)
             .unwrap()
             .cluster_at::<bsp::XEastYSouthZUp, _>(pos)
             .or(self.last_cluster);
-
-        self.cluster_changed = cluster != self.last_cluster;
 
         self.last_cluster = cluster;
 
@@ -472,43 +522,23 @@ impl<'a> Render for &'a mut World {
                 model_ranges: self.model_ranges[model_start_index..].iter(),
                 clipper,
             },
+            pipeline: PipelineDesc::World,
         }
     }
 }
 
-pub struct LightIter<'a> {
-    inner: hack::ImplTraitHack<'a>,
-    this: &'a World,
-}
-
-impl<'a> Iterator for LightIter<'a> {
-    type Item = &'a [Light];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(
-            self.this
-                .cluster_lights
-                .get(&self.inner.next()?)
-                .map(|v| &v[..])
-                .unwrap_or(&[]),
-        )
-    }
-}
-
-impl<'a> HasLights for &'a World {
-    type Lights = std::iter::Cloned<std::iter::Flatten<LightIter<'a>>>;
-
+impl RenderWorld for World {
     #[inline]
-    fn lights(self) -> Self::Lights {
-        let iter = LightIter {
-            inner: hack::impl_trait_hack(&self.vis, self.last_cluster),
-            this: self,
-        };
+    fn lights(&self, position: cgmath::Vector3<f32>) -> Option<Range<u32>> {
+        let pos: [f32; 3] = position.into();
 
-        iter.flatten().cloned()
-    }
-
-    fn dirty(&self) -> bool {
-        self.cluster_changed
+        self.cluster_lights
+            .get(
+                self.vis
+                    .model(0)
+                    .unwrap()
+                    .cluster_at::<bsp::XEastYSouthZUp, _>(pos)? as usize,
+            )
+            .cloned()
     }
 }

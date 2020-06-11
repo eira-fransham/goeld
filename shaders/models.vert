@@ -5,12 +5,18 @@
 
 layout(location = 3) in vec3 a_Normal;
 
-layout(location = 2) out vec3 v_Normal;
-layout(location = 3) out vec4 v_Position;
+layout(location = 2) out vec3 v_Pos;
+layout(location = 3) out vec3 v_Normal;
+
+layout(set = 0, binding = 4) uniform ModelData {
+    mat4 translation;
+};
 
 void main() {
-    transformTexturedVertex(u_View, u_Proj);
+    vec4 pos = translation * a_Pos;
 
+    v_Pos = pos.xyz;
     v_Normal = a_Normal;
-    v_Position = a_Pos;
+
+    transformTexturedVertex(u_View, u_Proj, pos);
 }

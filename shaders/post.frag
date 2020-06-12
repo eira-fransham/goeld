@@ -6,8 +6,9 @@ layout(location = 0) in vec2 v_TexCoord;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform texture2D t_Diffuse;
-layout(set = 0, binding = 1) uniform sampler s_Color;
-layout(set = 0, binding = 2) uniform Locals {
+layout(set = 0, binding = 1) uniform texture2D t_Lights;
+layout(set = 0, binding = 2) uniform sampler s_Color;
+layout(set = 0, binding = 3) uniform Locals {
     float invGamma;
     float intensity;
 };
@@ -81,5 +82,10 @@ vec4 reinhard(vec4 color) {
 }
 
 void main() {
-    outColor = aces(texture(sampler2D(t_Diffuse, s_Color), v_TexCoord));
+    vec4 diffuse = texture(sampler2D(t_Diffuse, s_Color), v_TexCoord);
+    vec4 lights = texture(sampler2D(t_Lights, s_Color), v_TexCoord);
+
+    vec3 combined = diffuse.rgb * (1 - lights.a) + diffuse.rgb * lights.rgb * lights.a;
+
+    outColor = vec4(aces(combined), 1);
 }

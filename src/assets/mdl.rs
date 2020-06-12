@@ -61,6 +61,8 @@ impl LoadAsset for MdlAsset<'_> {
             }
         }
 
+        const ASSUME_SIMPLE_TEXTURES:bool = true;
+
         let loader = loader.textures();
 
         let materials = self
@@ -70,9 +72,8 @@ impl LoadAsset for MdlAsset<'_> {
                 let mut tex = mat.diffuse().unwrap();
 
                 if let Some(first) = tex.textures.next() {
-                    if true || tex.textures.len() == 0 {
-                        // TODO: Handle the "invert" flag
-                        if first.blend_op == assimp::BlendOp::Replace {
+                    if ASSUME_SIMPLE_TEXTURES || tex.textures.len() == 0 {
+                        if ASSUME_SIMPLE_TEXTURES || first.blend_op == assimp::BlendOp::Replace {
                             match textures_by_name.entry(first.path.to_string().into()) {
                                 Entry::Occupied(entry) => (first.channel, entry.get().clone()),
                                 Entry::Vacant(entry) => {

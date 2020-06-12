@@ -9,7 +9,7 @@ use crate::{
 use cgmath::{InnerSpace, Point3};
 use collision::{Aabb3, Frustum, Relation};
 use fnv::FnvHashMap as HashMap;
-use std::ops::Range;
+use std::{convert::TryFrom, ops::Range};
 
 pub struct BspAsset(pub bsp::Bsp);
 
@@ -31,12 +31,15 @@ pub struct World {
     cluster_lights: Vec<Range<u32>>,
 }
 
+const EMISSIVE_THRESHOLD: u32 = 3;
+
 #[inline]
 fn leaf_meshes<'a, F>(
     bsp: &'a bsp::Bsp,
     face_start_indices: &'a mut HashMap<u16, u32>,
     mut get_texture: F,
     lightmap_cache: &mut Atlas,
+    cluster_lights: &mut HashMap<u16, Vec<Light>>,
 ) -> (
     Vec<TexturedVertex>,
     Vec<WorldVertex>,
@@ -130,6 +133,29 @@ where
     }
 
     let face_start_indices: &'a HashMap<_, _> = &*face_start_indices;
+
+    for leaf in bsp
+        .model(0)
+        .into_iter()
+        .flat_map(|model| model.leaves().into_iter().flatten())
+    {
+        for face in leaf.faces() {
+            if let (Some(tex), Some(cluster)) = (face.texture(), u16::try_from(leaf.cluster).ok()) {
+                if tex.value > EMISSIVE_THRESHOLD
+                    && !tex.flags.contains(bsp::SurfaceFlags::NODLIGHT)
+                    && !tex.flags.contains(bsp::SurfaceFlags::NODRAW)
+                    && !tex.flags.contains(bsp::SurfaceFlags::SKY)
+                {
+                    let [x, y, z] = face.center().0;
+
+                    cluster_lights.entry(cluster).or_default().push(Light {
+                        position: [x, y, z, 1.],
+                        color: [1., 1., 1., tex.value as f32],
+                    });
+                }
+            }
+        }
+    }
 
     (
         tex_vertices,
@@ -311,8 +337,13 @@ impl LoadAsset for BspAsset {
         let (tex_vert_offset, world_vert_offset, model_ranges, cluster_meta) = {
             use std::convert::TryInto;
 
-            let (leaf_tex_vertices, leaf_world_vertices, mut model_indices) =
-                leaf_meshes(&bsp, &mut buf, &mut get_texture, lightmap);
+            let (leaf_tex_vertices, leaf_world_vertices, mut model_indices) = leaf_meshes(
+                &bsp,
+                &mut buf,
+                &mut get_texture,
+                lightmap,
+                &mut cluster_lights,
+            );
             let mut clusters = vec![
                 (vec![], Point3::from([0f32; 3]), Point3::from([0f32; 3]));
                 bsp.clusters().count()
@@ -389,6 +420,8 @@ impl LoadAsset for BspAsset {
         let cluster_lights = bsp
             .clusters()
             .map(|cluster| {
+                const LIGHT_DEDUP_THRESHOLD: f32 = 8.;
+
                 let mut bsp_lights = bsp
                     .vis
                     .visible_clusters(cluster, ..)
@@ -400,15 +433,19 @@ impl LoadAsset for BspAsset {
 
                 bsp_lights.sort_unstable_by(|a, b| {
                     let a_score = (cgmath::Vector4::from(a.position) - center).magnitude2()
-                        * cgmath::Vector4::from(a.color).magnitude2();
+                        * cgmath::Vector4::from(a.color).magnitude();
                     let b_score = (cgmath::Vector4::from(b.position) - center).magnitude2()
-                        * cgmath::Vector4::from(b.color).magnitude2();
+                        * cgmath::Vector4::from(b.color).magnitude();
 
-                    a_score
-                        .partial_cmp(&b_score)
+                    b_score
+                        .partial_cmp(&a_score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-                bsp_lights.dedup();
+                bsp_lights.dedup_by(|a, b| {
+                    (cgmath::Vector4::from(a.position) - cgmath::Vector4::from(b.position))
+                        .magnitude2()
+                        < LIGHT_DEDUP_THRESHOLD.powi(2)
+                });
                 bsp_lights.truncate(crate::render::MAX_LIGHTS);
 
                 let range = lights.append(bsp_lights);
@@ -429,6 +466,7 @@ impl LoadAsset for BspAsset {
     }
 }
 
+#[derive(Clone)]
 pub struct WorldIndexIter<'a> {
     clusters: hack::ImplTraitHack<'a>,
     cluster_meta: &'a [ClusterMeta],

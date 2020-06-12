@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "nightly", feature(const_generics))]
-
 use arrayvec::{Array, ArrayString, ArrayVec};
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::{io, iter, num};
@@ -13,57 +11,6 @@ fn error(msg: impl ToString) -> io::Error {
 fn error(msg: impl ToString) -> io::Error {
     panic!("{}", msg.to_string())
 }
-
-#[cfg(feature = "nightly")]
-mod magic {
-    use super::{ElementSize, SimpleParse};
-    use std::{fmt, io, ops};
-
-    #[derive(PartialEq, Default, Copy, Clone)]
-    pub struct Magic<const VALUE: [u8; 4]>;
-
-    impl<const V: [u8; 4]> fmt::Debug for Magic<V> {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            V.fmt(f)
-        }
-    }
-
-    impl<const V: [u8; 4]> Magic<V> {
-        pub const fn into_inner(self) -> [u8; 4] {
-            V
-        }
-    }
-
-    impl<const V: [u8; 4]> ops::Deref for Magic<V> {
-        type Target = [u8; 4];
-
-        fn deref(&self) -> &Self::Target {
-            &V
-        }
-    }
-
-    impl<const V: [u8; 4]> ElementSize for Magic<V> {
-        const SIZE: usize = <[u8; 4]>::SIZE;
-    }
-
-    impl<const V: [u8; 4]> SimpleParse for Magic<V> {
-        fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
-            let val = <[u8; 4]>::parse(r)?;
-
-            if val == V {
-                Ok(Magic)
-            } else {
-                Err(super::error(format!(
-                    "Invalid magic number: expected {:?}, got {:?}",
-                    V, val
-                )))
-            }
-        }
-    }
-}
-
-#[cfg(feature = "nightly")]
-pub use magic::Magic;
 
 pub trait ElementSize {
     const SIZE: usize;
@@ -368,6 +315,24 @@ impl<C> std::ops::Mul<f32> for V3<C> {
             [self.0[0] * other, self.0[1] * other, self.0[2] * other],
             self.1,
         )
+    }
+}
+
+impl<C> std::iter::Sum<Self> for V3<C>
+where
+    C: Default,
+{
+    fn sum<I>(mut iter: I) -> Self
+    where
+        I: Iterator<Item = Self>,
+    {
+        let mut out = iter.next().unwrap_or(V3([0., 0., 0.], C::default()));
+
+        for v in iter {
+            out = out + v;
+        }
+
+        out
     }
 }
 

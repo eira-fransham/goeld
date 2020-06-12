@@ -93,7 +93,7 @@ pub struct RenderCache {
     pub indices: BufferCache<u32>,
 
     pub model_data: AlignedBufferCache<ModelData>,
-    pub lights: AlignedBufferCache<Light>,
+    pub lights: BufferCache<Light>,
 }
 
 impl RenderCache {
@@ -141,7 +141,7 @@ impl RenderCache {
                 wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
                 MINIMUM_ALIGNMENT as u16,
             ),
-            lights: AlignedBufferCache::new(wgpu::BufferUsage::UNIFORM, MINIMUM_ALIGNMENT as u16),
+            lights: BufferCache::new(wgpu::BufferUsage::VERTEX),
         }
     }
 
@@ -257,7 +257,7 @@ unsafe impl Pod for Light {}
 unsafe impl Zeroable for Light {}
 
 pub trait Render {
-    type Indices: Iterator<Item = Range<u32>>;
+    type Indices: Iterator<Item = Range<u32>> + Clone;
     type Offsets: Into<RenderOffsets>;
 
     fn is_visible<T: World>(&self, _world: &T) -> bool {
@@ -304,6 +304,7 @@ pub struct Renderer {
     world_pipeline: Option<pipelines::world::Pipeline>,
     skybox_pipeline: Option<pipelines::sky::Pipeline>,
     model_pipeline: Option<pipelines::models::Pipeline>,
+    rtlights_pipeline: Option<pipelines::rtlights::Pipeline>,
     post_pipeline: Option<pipelines::postprocess::Pipeline>,
     msaa_factor: NonZeroU8,
     msaa_buffer: Option<MsaaBuffer>,
@@ -406,6 +407,7 @@ impl<'pass, 'world> RenderContext<'pass, 'world> {
     {
         // Yeah I know this is weird but it's basically free and it makes the output way
         // easier to debug in renderdoc
+        #[derive(Clone)]
         struct MergeRanges<I> {
             ranges: I,
         }
@@ -444,6 +446,8 @@ impl<'pass, 'world> RenderContext<'pass, 'world> {
 
         let RenderOffsets(tex_o, world_o, norm_o) = offsets.into();
 
+        let mut ranges_for_lights = None;
+
         if self.cur_pipeline != Some(pipeline) {
             self.cur_pipeline = Some(pipeline);
 
@@ -452,36 +456,27 @@ impl<'pass, 'world> RenderContext<'pass, 'world> {
                     let pipeline = self.renderer.skybox_pipeline.as_ref().unwrap();
 
                     self.rpass.set_bind_group(0, &pipeline.bind_group, &[]);
+
                     &pipeline.pipeline
                 }
                 PipelineDesc::World => {
                     let pipeline = self.renderer.world_pipeline.as_ref().unwrap();
 
                     self.rpass.set_bind_group(0, &pipeline.bind_group, &[]);
+
                     &pipeline.pipeline
                 }
-                PipelineDesc::Models {
-                    origin,
-                    data_offset,
-                } => {
+                PipelineDesc::Models { data_offset, .. } => {
                     let pipeline = self.renderer.model_pipeline.as_ref().unwrap();
 
-                    let range = self.world.lights(origin).unwrap_or(0..0);
-
-                    let start = range.start as u32;
-                    let num_bytes = range.count();
-                    assert_eq!(num_bytes % std::mem::size_of::<Light>(), 0);
-                    let num_lights = (num_bytes / std::mem::size_of::<Light>()).min(MAX_LIGHTS);
+                    ranges_for_lights = Some(ranges.clone());
 
                     self.rpass.set_bind_group(
                         0,
                         &pipeline.bind_group,
-                        &[
-                            u32::try_from(data_offset).unwrap(),
-                            start,
-                            (num_lights * MINIMUM_ALIGNMENT) as u32,
-                        ],
+                        &[u32::try_from(data_offset).unwrap()],
                     );
+
                     &pipeline.pipeline
                 }
             };
@@ -520,6 +515,26 @@ impl<'pass, 'world> RenderContext<'pass, 'world> {
 
         for range in ranges {
             self.rpass.draw_indexed(range, 0, 0..1);
+        }
+
+        if let PipelineDesc::Models {
+            origin,
+            data_offset,
+        } = pipeline
+        {
+            let pipeline = self.renderer.rtlights_pipeline.as_ref().unwrap();
+            self.rpass.set_pipeline(&pipeline.pipeline);
+            self.rpass.set_bind_group(
+                0,
+                &pipeline.bind_group,
+                &[u32::try_from(data_offset).unwrap()],
+            );
+
+            if let Some(lights) = self.world.lights(origin) {
+                for range in ranges_for_lights.unwrap() {
+                    self.rpass.draw_indexed(range, 0, lights.clone());
+                }
+            }
         }
     }
 }
@@ -560,8 +575,7 @@ unsafe impl Zeroable for Matrices {}
 unsafe impl Pod for FragmentUniforms {}
 unsafe impl Zeroable for FragmentUniforms {}
 
-// TODO: Deferred lighting
-pub const MAX_LIGHTS: usize = 16;
+pub const MAX_LIGHTS: usize = 128;
 const MINIMUM_ALIGNMENT: usize = 256;
 
 impl Renderer {
@@ -569,9 +583,6 @@ impl Renderer {
         assert_eq!(std::mem::size_of::<Light>(), 8 * 4);
 
         let cache = RenderCache::new(device);
-
-        let diffuse_atlas_view = cache.diffuse.texture_view();
-        let lightmap_atlas_view = cache.lightmap.texture_view();
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("sampler_diffuse"),
@@ -683,6 +694,7 @@ impl Renderer {
             world_pipeline: None,
             skybox_pipeline: None,
             model_pipeline: None,
+            rtlights_pipeline: None,
             post_pipeline: None,
             nearest_sampler,
             linear_sampler,
@@ -795,8 +807,16 @@ impl Renderer {
                 &self.linear_sampler,
                 &self.matrices_buffer,
                 &self.fragment_uniforms_buffer,
-                &self.light_count_buffer,
-                self.cache.lights.as_ref().unwrap(),
+                self.cache.model_data.as_ref().unwrap(),
+                self.msaa_factor.get() as u32,
+            ));
+        }
+
+        if self.rtlights_pipeline.is_none() {
+            self.rtlights_pipeline = Some(pipelines::rtlights::build(
+                device,
+                &self.matrices_buffer,
+                &self.fragment_uniforms_buffer,
                 self.cache.model_data.as_ref().unwrap(),
                 self.msaa_factor.get() as u32,
             ));
@@ -808,7 +828,7 @@ impl Renderer {
             let (width, height) = self.out_size;
 
             let buffer = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("msaa_buffer"),
+                label: Some("msaa_diffuse_buffer"),
                 size: wgpu::Extent3d {
                     width,
                     height,
@@ -817,12 +837,12 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: self.msaa_factor.get() as u32,
                 dimension: wgpu::TextureDimension::D2,
-                format: pipelines::postprocess::POST_BUFFER_FORMAT,
+                format: pipelines::postprocess::DIFFUSE_BUFFER_FORMAT,
                 usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
             });
 
             let light_buffer = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("msaa_buffer"),
+                label: Some("msaa_light_buffer"),
                 size: wgpu::Extent3d {
                     width,
                     height,
@@ -831,7 +851,7 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: self.msaa_factor.get() as u32,
                 dimension: wgpu::TextureDimension::D2,
-                format: pipelines::postprocess::POST_BUFFER_FORMAT,
+                format: pipelines::postprocess::LIGHT_BUFFER_FORMAT,
                 usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
             });
 
@@ -845,12 +865,15 @@ impl Renderer {
             self.world_pipeline = None;
             self.model_pipeline = None;
 
+            let MsaaBuffer {
+                diffuse_buffer,
+                light_buffer,
+                ..
+            } = self.msaa_buffer.as_ref().unwrap();
             self.post_pipeline = Some(pipelines::postprocess::build(
                 device,
-                self.msaa_buffer
-                    .as_ref()
-                    .map(|buf| &buf.diffuse_buffer)
-                    .unwrap(),
+                diffuse_buffer,
+                light_buffer,
                 &self.linear_sampler,
                 &self.fragment_uniforms_buffer,
             ));
@@ -938,23 +961,39 @@ impl Renderer {
         };
 
         {
+            let MsaaBuffer {
+                diffuse_buffer,
+                light_buffer,
+                ..
+            } = self.msaa_buffer.as_ref().unwrap();
+
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
-                    attachment: self
-                        .msaa_buffer
-                        .as_ref()
-                        .map(|buf| &buf.diffuse_buffer)
-                        .unwrap(),
-                    resolve_target: None,
-                    load_op: wgpu::LoadOp::Load,
-                    store_op: wgpu::StoreOp::Store,
-                    clear_color: wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
+                color_attachments: &[
+                    wgpu::RenderPassColorAttachmentDescriptor {
+                        attachment: diffuse_buffer,
+                        resolve_target: None,
+                        load_op: wgpu::LoadOp::Load,
+                        store_op: wgpu::StoreOp::Store,
+                        clear_color: wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
                     },
-                }],
+                    wgpu::RenderPassColorAttachmentDescriptor {
+                        attachment: light_buffer,
+                        resolve_target: None,
+                        load_op: wgpu::LoadOp::Clear,
+                        store_op: wgpu::StoreOp::Store,
+                        clear_color: wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        },
+                    },
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachmentDescriptor {
                     attachment: &depth,
                     depth_load_op: wgpu::LoadOp::Clear,
@@ -967,6 +1006,7 @@ impl Renderer {
             });
 
             rpass.set_index_buffer(indices.slice(..));
+            rpass.set_vertex_buffer(2, self.cache().lights.as_ref().unwrap().slice(..));
 
             render(RenderContext {
                 renderer: self,

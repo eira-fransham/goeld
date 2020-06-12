@@ -9,8 +9,8 @@ use arrayvec::ArrayString;
 use bitflags::bitflags;
 use bv::BitVec;
 pub use goldsrc_format_common::{
-    parseable, CoordSystem, ElementSize, Magic, QVec, SimpleParse, XEastYDownZSouth,
-    XEastYNorthZUp, XEastYSouthZUp, V3,
+    parseable, CoordSystem, ElementSize, QVec, SimpleParse, XEastYDownZSouth, XEastYNorthZUp,
+    XEastYSouthZUp, V3,
 };
 use std::{
     convert::{TryFrom, TryInto},
@@ -30,6 +30,52 @@ fn error(msg: impl ToString) -> io::Error {
 #[inline]
 fn error(msg: impl ToString) -> io::Error {
     panic!("{}", msg.to_string())
+}
+
+macro_rules! magic {
+    (struct $name:ident($magic:expr);) => {
+        #[derive(PartialEq, Default, Copy, Clone)]
+        pub struct $name;
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                $magic.fmt(f)
+            }
+        }
+
+        impl $name {
+            pub const fn into_inner(self) -> [u8; 4] {
+                $magic
+            }
+        }
+
+        impl Deref for $name {
+            type Target = [u8; 4];
+
+            fn deref(&self) -> &Self::Target {
+                &$magic
+            }
+        }
+
+        impl ElementSize for $name {
+            const SIZE: usize = <[u8; 4]>::SIZE;
+        }
+
+        impl SimpleParse for $name {
+            fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
+                let val = <[u8; 4]>::parse(r)?;
+
+                if val == $magic {
+                    Ok($name)
+                } else {
+                    Err(error(format!(
+                        "Invalid magic number: expected {:?}, got {:?}",
+                        $magic, val
+                    )))
+                }
+            }
+        }
+    };
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -119,8 +165,12 @@ impl ElementSize for NotApplicable {
     const SIZE: usize = usize::MAX;
 }
 
+magic! {
+    struct Q2Magic(QUAKE2_MAGIC);
+}
+
 impl BspFormat for Quake2 {
-    type Magic = Magic<QUAKE2_MAGIC>;
+    type Magic = Q2Magic;
 
     const VERSION: u32 = 0x26;
 
@@ -1755,6 +1805,35 @@ impl Q2Model {
 }
 
 impl<'a> Handle<'a, Bsp, Q2Model> {
+    // #[inline]
+    // pub fn leaf_indices(self) -> Option<impl Iterator<Item = u32> + Clone + 'a> {
+    //     use itertools::Either;
+
+    //     let mut stack = vec![Either::Left((self.headnode, self.bsp.node(self.headnode as usize)?))];
+
+    //     Some(iter::from_fn(move || loop {
+    //         let next = stack.pop()?;
+    //         let node = match next {
+    //             Either::Left(node) => node,
+    //             Either::Right(leaf) => break Some(leaf),
+    //         };
+    //         let [left, right] = node.children;
+    //         let left = if left < 0 {
+    //             Either::Right(self.bsp.leaf(-(left + 1) as usize)?)
+    //         } else {
+    //             Either::Left(self.bsp.node(left as usize)?)
+    //         };
+    //         let right = if right < 0 {
+    //             Either::Right(self.bsp.leaf(-(right + 1) as usize)?)
+    //         } else {
+    //             Either::Left(self.bsp.node(right as usize)?)
+    //         };
+
+    //         stack.push(left);
+    //         stack.push(right);
+    //     }))
+    // }
+
     #[inline]
     pub fn leaves(self) -> Option<impl Iterator<Item = Handle<'a, Bsp, Q2Leaf>> + Clone + 'a> {
         use itertools::Either;
@@ -1954,6 +2033,12 @@ impl<'a> Handle<'a, Bsp, Face> {
     pub fn vertices(self) -> impl ExactSizeIterator<Item = &'a QVec> + 'a {
         self.vert_indices()
             .map(move |i| &self.bsp.vertices[i as usize])
+    }
+
+    #[inline]
+    pub fn center(self) -> QVec {
+        let tot: QVec = self.vertices().cloned().sum();
+        tot / (self.vert_indices().len() as f32)
     }
 }
 

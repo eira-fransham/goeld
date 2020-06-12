@@ -31,7 +31,7 @@ pub struct World {
     cluster_lights: Vec<Range<u32>>,
 }
 
-const EMISSIVE_THRESHOLD: u32 = 3;
+const EMISSIVE_THRESHOLD: u32 = 10;
 
 #[inline]
 fn leaf_meshes<'a, F>(
@@ -256,6 +256,10 @@ impl LoadAsset for BspAsset {
         let mut cluster_lights = HashMap::<u16, Vec<Light>>::with_hasher(Default::default());
 
         for (pos, intensity) in bsp_lights {
+            if intensity < EMISSIVE_THRESHOLD as f32 {
+                continue;
+            }
+
             let cluster = bsp
                 .vis
                 .cluster_at::<bsp::XEastYSouthZUp, _>(bsp.vis.root_node().unwrap(), pos);
@@ -420,31 +424,20 @@ impl LoadAsset for BspAsset {
         let cluster_lights = bsp
             .clusters()
             .map(|cluster| {
-                const LIGHT_DEDUP_THRESHOLD: f32 = 8.;
-
                 let mut bsp_lights = bsp
                     .vis
                     .visible_clusters(cluster, ..)
                     .flat_map(|cluster| cluster_lights.get(&cluster))
                     .flat_map(|lights| lights.iter().cloned())
                     .collect::<Vec<_>>();
-                let aabb = cluster_meta[cluster as usize].aabb.clone();
-                let center = (aabb.min.to_homogeneous() + aabb.max.to_homogeneous()) / 2.;
 
                 bsp_lights.sort_unstable_by(|a, b| {
-                    let a_score = (cgmath::Vector4::from(a.position) - center).magnitude2()
-                        * cgmath::Vector4::from(a.color).magnitude();
-                    let b_score = (cgmath::Vector4::from(b.position) - center).magnitude2()
-                        * cgmath::Vector4::from(b.color).magnitude();
+                    let a_score = cgmath::Vector4::from(a.color).magnitude2();
+                    let b_score = cgmath::Vector4::from(b.color).magnitude2();
 
                     b_score
                         .partial_cmp(&a_score)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                bsp_lights.dedup_by(|a, b| {
-                    (cgmath::Vector4::from(a.position) - cgmath::Vector4::from(b.position))
-                        .magnitude2()
-                        < LIGHT_DEDUP_THRESHOLD.powi(2)
                 });
                 bsp_lights.truncate(crate::render::MAX_LIGHTS);
 

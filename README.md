@@ -1,9 +1,13 @@
 # Göld - Löve but for Goldsrc
 
 This is designed to be a game engine for hacking together 3D games using old tech. It's based on the
-simple mental model of PyGame or Löve, but for Goldsrc/Quake-era tech. Right now it can load Quake 2
-maps and display them, including the skybox textures, but Goldsrc
-models and display 
+simple mental model of PyGame or Löve, but for Goldsrc/Quake-era tech. My ultimate goal is to have a
+simple engine which can do basically everything that many simplistic 3D games will need, without
+making an attempt at being too general. I can currently load Quake 2 maps (although not Quake/Goldsrc
+maps yet), render them with proper BSP culling and frustrum culling, and load and render HL1 models
+(as you can see in the 4th image). Models are lit dynamically using a really simple instanced
+lighting system - Quake 2 maps tend to have a _lot_ of lights though, so we should probably work out a 
+better way to handle lighting down the line so we don't have to do so many expensive calculations.
 
 ![Screenshot 1](screenshots/01.png) 
 
@@ -12,12 +16,6 @@ models and display
 ![Screenshot 3](screenshots/03.png)
 
 ![Screenshot 4](screenshots/04.png)
-
-I've also got a parser for the monstrosity that is the Goldsrc .mdl format, so my next task is to
-get Half-Life 1 models loading, displaying and animating in this engine. It's very, very likely that
-I'll switch to updating the already-existing bindings to `assimp` and using those instead, since I'm
-certain that my existing parser is buggy (since the format is a mess) and integrating with `assimp`
-allows me to support every model format that it supports, instead of only .mdl.
 
 ## How to use
 

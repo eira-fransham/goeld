@@ -29,12 +29,14 @@ pub struct World {
     model_ranges: Vec<Range<u32>>,
 
     cluster_lights: Vec<Range<u32>>,
+
+    light_probes: Vec<(cgmath::Vector3<f32>, crate::cache::AppendManyResult)>,
 }
 
 const EMISSIVE_THRESHOLD: u32 = 10;
 
 #[inline]
-fn leaf_meshes<'a, F>(
+fn cluster_meshes<'a, F>(
     bsp: &'a bsp::Bsp,
     face_start_indices: &'a mut HashMap<u16, u32>,
     mut get_texture: F,
@@ -341,7 +343,7 @@ impl LoadAsset for BspAsset {
         let (tex_vert_offset, world_vert_offset, model_ranges, cluster_meta) = {
             use std::convert::TryInto;
 
-            let (leaf_tex_vertices, leaf_world_vertices, mut model_indices) = leaf_meshes(
+            let (leaf_tex_vertices, leaf_world_vertices, mut model_indices) = cluster_meshes(
                 &bsp,
                 &mut buf,
                 &mut get_texture,
@@ -424,10 +426,9 @@ impl LoadAsset for BspAsset {
         let cluster_lights = bsp
             .clusters()
             .map(|cluster| {
-                let mut bsp_lights = bsp
-                    .vis
-                    .visible_clusters(cluster, ..)
-                    .flat_map(|cluster| cluster_lights.get(&cluster))
+                let mut bsp_lights = cluster_lights
+                    .get(&cluster)
+                    .iter()
                     .flat_map(|lights| lights.iter().cloned())
                     .collect::<Vec<_>>();
 
@@ -454,6 +455,7 @@ impl LoadAsset for BspAsset {
             cluster_meta,
             model_ranges,
             cluster_lights,
+            light_probes: vec![],
             last_cluster: None,
         })
     }
@@ -558,18 +560,46 @@ impl<'a> Render for &'a mut World {
     }
 }
 
-impl RenderWorld for World {
+#[derive(Clone)]
+pub struct WorldLightIter<'a> {
+    clusters: hack::ImplTraitHack<'a>,
+    cluster_lights: &'a [Range<u32>],
+}
+
+impl Iterator for WorldLightIter<'_> {
+    type Item = Range<u32>;
+
     #[inline]
-    fn lights(&self, position: cgmath::Vector3<f32>) -> Option<Range<u32>> {
+    fn next(&mut self) -> Option<Self::Item> {
+        let Self {
+            clusters,
+            cluster_lights,
+        } = self;
+
+        clusters
+            .filter_map(move |cluster| cluster_lights.get(cluster as usize).cloned())
+            .next()
+    }
+}
+
+impl<'a> RenderWorld for &'a World {
+    type Lights = WorldLightIter<'a>;
+
+    #[inline]
+    fn lights(self, position: cgmath::Vector3<f32>) -> Self::Lights {
         let pos: [f32; 3] = position.into();
 
-        self.cluster_lights
-            .get(
+        let vis = &self.vis;
+
+        WorldLightIter {
+            clusters: hack::impl_trait_hack(
+                vis,
                 self.vis
                     .model(0)
                     .unwrap()
-                    .cluster_at::<bsp::XEastYSouthZUp, _>(pos)? as usize,
-            )
-            .cloned()
+                    .cluster_at::<bsp::XEastYSouthZUp, _>(pos),
+            ),
+            cluster_lights: &self.cluster_lights,
+        }
     }
 }

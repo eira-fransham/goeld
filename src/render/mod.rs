@@ -1,6 +1,6 @@
 use crate::cache::{AlignedBufferCache, Atlas, BufferCache, CacheCommon};
 use bytemuck::{Pod, Zeroable};
-use std::{convert::TryFrom, mem, num::NonZeroU8, ops::Range};
+use std::{convert::TryFrom, iter, mem, num::NonZeroU8, ops::Range};
 
 mod pipelines;
 
@@ -272,16 +272,20 @@ pub trait TransferData {
 }
 
 pub trait World {
+    type Lights: Iterator<Item = Range<u32>>;
+
     fn is_visible(&self, _camera: &Camera, _position: cgmath::Vector3<f32>) -> bool {
         true
     }
 
-    fn lights(&self, position: cgmath::Vector3<f32>) -> Option<Range<u32>>;
+    fn lights(self, position: cgmath::Vector3<f32>) -> Self::Lights;
 }
 
 impl World for () {
-    fn lights(&self, _position: cgmath::Vector3<f32>) -> Option<Range<u32>> {
-        None
+    type Lights = iter::Empty<Range<u32>>;
+
+    fn lights(self, _position: cgmath::Vector3<f32>) -> Self::Lights {
+        iter::empty()
     }
 }
 
@@ -294,7 +298,6 @@ struct MsaaBuffer {
 pub struct Renderer {
     cache: RenderCache,
     matrices_buffer: wgpu::Buffer,
-    light_count_buffer: wgpu::Buffer,
     fragment_uniforms: FragmentUniforms,
     fragment_uniforms_dirty: bool,
     fragment_uniforms_buffer: wgpu::Buffer,
@@ -377,11 +380,11 @@ unsafe impl Zeroable for WorldVertex {}
 /// forth.
 // TODO: Maybe generate the indices-per-cluster lazily to reduce GPU memory pressure? We can recalculate
 //       _only_ the indices for the cluster we're entering when we change clusters.
-pub struct RenderContext<'pass, 'world> {
+pub struct RenderContext<'pass, W = ()> {
     pub renderer: &'pass Renderer,
     pub camera: &'pass Camera,
 
-    world: &'world dyn World,
+    world: W,
     cur_pipeline: Option<PipelineDesc>,
     rpass: wgpu::RenderPass<'pass>,
 }
@@ -390,15 +393,24 @@ pub trait Context {
     fn camera(&self) -> &Camera;
 }
 
-impl Context for RenderContext<'_, '_> {
+impl<W> Context for RenderContext<'_, W> {
     fn camera(&self) -> &Camera {
         self.camera
     }
 }
 
-impl<'pass, 'world> RenderContext<'pass, 'world> {
-    pub fn set_lights<NewWorld: World>(&mut self, lights: &'world NewWorld) {
-        self.world = lights;
+impl<'pass, W> RenderContext<'pass, W>
+where
+    W: World + Copy,
+{
+    pub fn with_world<NewWorld: World>(self, world: NewWorld) -> RenderContext<'pass, NewWorld> {
+        RenderContext {
+            renderer: self.renderer,
+            camera: self.camera,
+            world,
+            cur_pipeline: self.cur_pipeline,
+            rpass: self.rpass,
+        }
     }
 
     pub fn render<T>(&mut self, to_render: T)
@@ -530,11 +542,17 @@ impl<'pass, 'world> RenderContext<'pass, 'world> {
                 &[u32::try_from(data_offset).unwrap()],
             );
 
-            if let Some(lights) = self.world.lights(origin) {
-                for range in ranges_for_lights.unwrap() {
-                    self.rpass.draw_indexed(range, 0, lights.clone());
+            for range in ranges_for_lights.unwrap() {
+                if range.len() > 0 {
+                    for lights in self.world.lights(origin) {
+                        if lights.len() > 0 {
+                            self.rpass.draw_indexed(range.clone(), 0, lights.clone());
+                        }
+                    }
                 }
             }
+
+            self.cur_pipeline = None;
         }
     }
 }
@@ -548,8 +566,7 @@ impl<'pass, 'world> RenderContext<'pass, 'world> {
 struct Matrices {
     /// Translation, in the Quake coordinate system
     translation: cgmath::Matrix4<f32>,
-    /// The rest of the view/projection matrix, so rotation,
-    /// con
+    /// The rest of the view/projection matrix
     projection: cgmath::Matrix4<f32>,
 }
 
@@ -629,11 +646,6 @@ impl Renderer {
             counts[i] = Count(i as u32);
         }
 
-        let light_count_buffer = device.create_buffer_with_data(
-            bytemuck::cast_slice(&counts[..]),
-            wgpu::BufferUsage::UNIFORM,
-        );
-
         let fragment_uniforms = FragmentUniforms {
             inv_gamma: gamma.recip(),
             intensity,
@@ -690,7 +702,6 @@ impl Renderer {
             fragment_uniforms,
             fragment_uniforms_dirty: false,
             fragment_uniforms_buffer,
-            light_count_buffer,
             world_pipeline: None,
             skybox_pipeline: None,
             model_pipeline: None,
@@ -917,7 +928,7 @@ impl Renderer {
         render: F,
     ) -> impl Iterator<Item = wgpu::CommandBuffer>
     where
-        F: FnOnce(RenderContext<'_, 'a>),
+        F: FnOnce(RenderContext<'_>),
     {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("render"),
@@ -1012,7 +1023,7 @@ impl Renderer {
                 renderer: self,
                 camera,
                 rpass,
-                world: &(),
+                world: (),
                 cur_pipeline: None,
             });
         }

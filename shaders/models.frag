@@ -31,9 +31,12 @@ void main() {
         )
     );
 
-    outColor = texture(
-        sampler2D(t_Diffuse, s_Color),
-        (offset + v_Tex.xy) /
-            textureSize(sampler2D(t_Diffuse, s_Color), 0)
+    outColor = vec4(
+        texture(
+            sampler2D(t_Diffuse, s_Color),
+            (offset + v_Tex.xy) /
+                textureSize(sampler2D(t_Diffuse, s_Color), 0)
+        ).rgb,
+        1
     );
 }

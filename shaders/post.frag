@@ -85,6 +85,8 @@ void main() {
     vec4 diffuse = texture(sampler2D(t_Diffuse, s_Color), v_TexCoord);
     vec4 lights = texture(sampler2D(t_Lights, s_Color), v_TexCoord);
 
+    lights.a = clamp(lights.a, 0, 1);
+
     vec3 combined = diffuse.rgb * (1 - lights.a) + diffuse.rgb * lights.rgb * lights.a;
 
     outColor = vec4(aces(combined), 1);

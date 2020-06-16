@@ -2,7 +2,7 @@ mod buffer;
 mod texture;
 
 pub use buffer::{AlignedBufferCache, BufferCache};
-pub use texture::Atlas;
+pub use texture::{Atlas, AppendManyResult};
 
 pub trait CacheCommon {
     type Key;

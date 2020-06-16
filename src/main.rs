@@ -391,7 +391,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                             ctx.render(&mut bsp);
 
-                            ctx.set_lights(&bsp);
+                            let mut ctx = ctx.with_world(&bsp);
 
                             ctx.render(&model);
                         },

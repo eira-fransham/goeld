@@ -1510,6 +1510,11 @@ impl Vis<Quake2> {
         0..self.visdata.cluster_offsets.len() as u16
     }
 
+    #[inline]
+    pub fn visible_from(&self, a: u16, b: u16) -> bool {
+        a == b || self.visdata.vecs[self.visdata.cluster_offsets[a as usize].pvs as u64 * 8 + b as u64]
+    }
+
     /// We use `impl TryInto` so that `-1` is transparently converted to "no visible clusters",
     /// but if you know your cluster ID is valid then you can skip that check.
     #[inline]

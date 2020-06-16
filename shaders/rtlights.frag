@@ -29,7 +29,7 @@ void main() {
     vec3 lightVec = v_LightPos.xyz - v_Pos;
 
     float dist = length(lightVec) * LIGHT_FALLOFF;
-    float amt = LIGHT_MULTIPLIER * v_LightColor.a / (1.0 + dist * dist);
+    float amt = LIGHT_MULTIPLIER * v_LightColor.a / (1.0 + pow(dist, LIGHT_FALLOFF));
 
     outLight = vec4(
         v_LightColor.rgb * amt * max(dot(v_Normal, normalize(lightVec)), 0),

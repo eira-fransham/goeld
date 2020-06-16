@@ -427,6 +427,54 @@ pub mod sky {
     }
 }
 
+// TODO: Use really low-res environment maps for lighting - this would probably also be useful to
+//       emulate HL1's fake "chrome" effect (although that might just be screen-space since HL1
+//       didn't have cubemaps).
+//
+// ------------------------------------------------------------------------------------------------
+// Process:
+//   Generate a bunch of probes
+//     (to start with we can just grab each leaf's midpoint but further down the line we'll need
+//     a better heuristic, we should absolutely have denser probes where there are more lights.
+//     Maybe keep generating new probes if the "initial probe" has a certain overall intensity
+//     or a certain differential in intensity between its faces)
+//   For each probe, allocate 6 rectangles in an atlas at really low res for each face of the
+//   cubemap (maybe 8x8px)
+//   Render skybox by doing a single pass where the whole cubemap has intensity calculated as
+//   its normal dot env light direction.
+//   Render world, so that any parts of the envmap where the sky isn't visible get correctly
+//   occluded.
+//     Here we can choose to either "properly" render the world (and get lovely bounce lighting)
+//     or ignore that and just render everything as black. The former might look anachronistic,
+//     but the way that lighting was implemented in these old engines is actually not so different,
+//     since it's based on the lightmap level at the character's feet.
+//   With additive blending, render all lights (using instancing) by calculating the dot of the
+//   cubemap's normal at each pixel and using that to calculate the correct light amount. For
+//   emissive faces, use area light-style calculation instead of pointlight calculation.
+//   When rendering models, blend between N cubemaps weighted by distance or distance squared
+//     (maybe best to do this with deferred shading?)
+//   Save envmap atlas and probe positions/clusters to external file so we don't need to regenerate
+//   it every time. Maybe include the map name and a hash of the bsp file itself so we can regen
+//   when the bsp changes.
+// ------------------------------------------------------------------------------------------------
+//
+// We can absolutely do this lazily, we don't even necessarily have to generate the probes upfront.
+// The only upfront work we absolutely need to do is cache the point lights (and spotlights for
+// Goldsrc). This might make serialising it to a file more complicated though.
+//
+// Since we're not really relying on the GLSL 3D vertex transformation pipeline, we could probably
+// do an entire cubemap in a single render. Without a geometry shader we couldn't do multiple
+// cubemaps in a single render, but it's unlikely that a geometry shader would be worth it
+// performance-wise. In fact, to remind myself later, there's a direct quote from someone on a
+// thread about geom shaders on Reddit that specifically says:
+// > All other cases I have personally tested, like using gs to render to multiple cubemap faces,
+// > we're slower than other techniques.
+//
+// From my approximations, we could store 1000 cubemaps at 8x8 per face (approx. 10 degree
+// granularity) in a 620x620 atlas, so probably a 1024x1024 atlas is more than enough. Since our
+// diffuse atlas and our lightmap atlases are both so small this is easily cheap enough to use.
+// There's nothing really stopping us from combining all our atlases into a single, large texture,
+// which would improve efficiency since less space would be wasted.
 pub mod rtlights {
     pub use super::Pipeline;
     use crate::render::{Light, NormalVertex, TexturedVertex};

@@ -21,20 +21,6 @@ layout(binding = 5) uniform Locals {
     uint atlasPadding;
 };
 
-
-// TODO: We don't use this right now, multi-sampling doesn't work on my
-//       CPU's integrated graphics so I get aliasing no matter what.
-vec4 antialiasGet(texture2D src, sampler smplr, vec2 uv) {
-    vec2 size = textureSize(sampler2D(src, smplr), 0);
-    vec2 puv = uv*size;
-
-    vec2 hfw = 0.5*fwidth(puv);
-    vec2 fl = floor(puv - 0.5) + 0.5;
-
-    vec2 nnn = (fl + smoothstep(0.5 - hfw, 0.5 + hfw, puv - fl))/size;
-    return texture(sampler2D(src, smplr), nnn);
-}
-
 float ifLt(float a, float b, float ifTrue, float ifFalse) {
     float lt = step(b, a);
 

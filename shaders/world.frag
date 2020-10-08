@@ -3,11 +3,12 @@
 
 layout(location = 0) in vec2 v_TexCoord;
 layout(location = 1) in flat uvec4 v_Tex;
-layout(location = 2) in flat uint v_TexCount;
-layout(location = 3) in vec2 v_LightmapCoord;
-layout(location = 4) in float v_LightmapWidth;
-layout(location = 5) in flat uint v_LightmapCount;
-layout(location = 6) in float v_Value;
+layout(location = 2) in flat uint v_TexStride;
+layout(location = 3) in flat uint v_TexCount;
+layout(location = 4) in vec2 v_LightmapCoord;
+layout(location = 5) in float v_LightmapWidth;
+layout(location = 6) in flat uint v_LightmapCount;
+layout(location = 7) in float v_Value;
 
 layout(location = 0) out vec4 outColor;
 
@@ -69,7 +70,7 @@ void main() {
 
     outColor = texture(
         sampler2D(t_Diffuse,  s_Color),
-        (offset + vec2(v_Tex.xy) + vec2((v_Tex.z + atlasPadding * 2) * (animationFrame % v_TexCount), 0)) /
+        (offset + vec2(v_Tex.xy) + vec2(v_TexStride * (animationFrame % v_TexCount), 0)) /
             textureSize(sampler2D(t_Diffuse, s_Color), 0)
     ) * light * 4;
 }

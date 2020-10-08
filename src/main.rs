@@ -7,7 +7,7 @@ use bsp::Bsp;
 use fnv::FnvHashSet as HashSet;
 use std::{iter, time};
 use winit::{
-    event::{self, Event, WindowEvent},
+    event::{self, DeviceEvent, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
@@ -25,28 +25,28 @@ use assets::{BspAsset, MdlAsset, SkyboxAsset};
 use loader::{Load, LoadAsset, Loader};
 use render::{Camera, Renderer};
 
+const DEFAULT_SIZE: (u32, u32) = (800, 600);
+
 async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window) {
+    let (width, height) = DEFAULT_SIZE;
+    window.set_inner_size(winit::dpi::LogicalSize { width, height });
     let size = window.inner_size();
-    let instance = wgpu::Instance::new();
+    let instance = wgpu::Instance::new(wgpu::BackendBit::PRIMARY);
     let surface = unsafe { instance.create_surface(&window) };
     let adapter = instance
-        .request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::Default,
-                compatible_surface: Some(&surface),
-            },
-            wgpu::BackendBit::PRIMARY,
-        )
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::Default,
+            compatible_surface: Some(&surface),
+        })
         .await
         .unwrap();
 
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
-                extensions: wgpu::Extensions {
-                    anisotropic_filtering: false,
-                },
+                features: wgpu::Features::default(),
                 limits: wgpu::Limits::default(),
+                shader_validation: cfg!(debug_assertions),
             },
             None,
         )
@@ -165,7 +165,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
     const ANIM_DT: f64 = 1. / 5.;
     const MOVEMENT_VEL: cgmath::Vector3<f32> = cgmath::Vector3::new(400., 0., 0.);
 
-    let mut lock_mouse = false;
+    let mut locked_mouse = false;
     let mut keys_down = HashSet::default();
 
     let update_dt = time::Duration::from_secs_f64(DT);
@@ -274,43 +274,22 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                         },
                     ..
                 } => {
-                    lock_mouse = false;
+                    locked_mouse = false;
+                    window.set_cursor_grab(false).unwrap();
                     window.set_cursor_visible(true);
                 }
                 WindowEvent::MouseInput {
                     state: event::ElementState::Pressed,
                     button: event::MouseButton::Left,
+                    device_id,
                     ..
                 } => {
-                    lock_mouse = !lock_mouse;
-                    window.set_cursor_visible(!lock_mouse);
+                    locked_mouse = !locked_mouse;
 
-                    if lock_mouse {
-                        window
-                            .set_cursor_position(winit::dpi::LogicalPosition::new(
-                                size.width as f32 / 2.,
-                                size.height as f32 / 2.,
-                            ))
-                            .unwrap();
-                    }
+                    window.set_cursor_visible(!locked_mouse);
+                    window.set_cursor_grab(locked_mouse).unwrap();
                 }
-                WindowEvent::CursorMoved { position, .. } => {
-                    if !lock_mouse {
-                        return;
-                    }
-
-                    let position: (f32, f32) = position.into();
-                    let (hw, hh) = (size.width as f32 / 2., size.height as f32 / 2.);
-                    let dx = hw - position.0;
-                    let dy = hh - position.1;
-
-                    window
-                        .set_cursor_position(winit::dpi::LogicalPosition::new(hw, hh))
-                        .unwrap();
-
-                    camera.update_pitch(|p| p - cgmath::Deg::from(cgmath::Rad(dy / 100.0)));
-                    camera.update_yaw(|y| y + cgmath::Deg::from(cgmath::Rad(dx / 100.0)));
-                }
+                WindowEvent::CursorMoved { position, .. } => {}
                 WindowEvent::KeyboardInput {
                     input:
                         event::KeyboardInput {
@@ -373,7 +352,16 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 }
                 _ => {}
             },
-            Event::RedrawRequested(_) => match swap_chain.get_next_texture() {
+            Event::DeviceEvent {
+                device_id,
+                event: DeviceEvent::MouseMotion { delta: (dx, dy) },
+            } if locked_mouse => {
+                let (dx, dy) = (dx as f32, dy as f32);
+
+                camera.update_pitch(|p| p + cgmath::Deg::from(cgmath::Rad(dy / 100.0)));
+                camera.update_yaw(|y| y - cgmath::Deg::from(cgmath::Rad(dx / 100.0)));
+            }
+            Event::RedrawRequested(_) => match swap_chain.get_current_frame() {
                 Ok(frame) => {
                     consecutive_timeouts = 0;
 
@@ -382,7 +370,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     queue.submit(renderer.render(
                         &device,
                         &camera,
-                        &frame.view,
+                        &frame.output.view,
                         &queue,
                         |mut ctx| {
                             if let Some(sky) = &sky {

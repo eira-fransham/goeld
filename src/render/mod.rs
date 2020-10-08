@@ -1,6 +1,7 @@
 use crate::cache::{AlignedBufferCache, Atlas, BufferCache, CacheCommon};
 use bytemuck::{Pod, Zeroable};
 use std::{convert::TryFrom, iter, mem, num::NonZeroU8, ops::Range};
+use wgpu::util::DeviceExt;
 
 mod pipelines;
 
@@ -367,8 +368,9 @@ pub struct WorldVertex {
     /// For animated textures (TODO: We can split this out even further since 99% of faces have
     /// non-animated textures)
     pub count: u32,
+    pub texture_stride: u32,
     pub lightmap_coord: [f32; 2],
-    pub lightmap_width: f32,
+    pub lightmap_stride: f32,
     pub lightmap_count: u32,
     pub value: f32,
 }
@@ -398,6 +400,8 @@ impl<W> Context for RenderContext<'_, W> {
         self.camera
     }
 }
+
+const RTLIGHTS: bool = false;
 
 impl<'pass, W> RenderContext<'pass, W>
 where
@@ -529,30 +533,32 @@ where
             self.rpass.draw_indexed(range, 0, 0..1);
         }
 
-        if let PipelineDesc::Models {
-            origin,
-            data_offset,
-        } = pipeline
-        {
-            let pipeline = self.renderer.rtlights_pipeline.as_ref().unwrap();
-            self.rpass.set_pipeline(&pipeline.pipeline);
-            self.rpass.set_bind_group(
-                0,
-                &pipeline.bind_group,
-                &[u32::try_from(data_offset).unwrap()],
-            );
+        if RTLIGHTS {
+            if let PipelineDesc::Models {
+                origin,
+                data_offset,
+            } = pipeline
+            {
+                let pipeline = self.renderer.rtlights_pipeline.as_ref().unwrap();
+                self.rpass.set_pipeline(&pipeline.pipeline);
+                self.rpass.set_bind_group(
+                    0,
+                    &pipeline.bind_group,
+                    &[u32::try_from(data_offset).unwrap()],
+                );
 
-            for range in ranges_for_lights.unwrap() {
-                if range.len() > 0 {
-                    for lights in self.world.lights(origin) {
-                        if lights.len() > 0 {
-                            self.rpass.draw_indexed(range.clone(), 0, lights.clone());
+                for range in ranges_for_lights.unwrap() {
+                    if range.len() > 0 {
+                        for lights in self.world.lights(origin) {
+                            if lights.len() > 0 {
+                                self.rpass.draw_indexed(range.clone(), 0, lights.clone());
+                            }
                         }
                     }
                 }
-            }
 
-            self.cur_pipeline = None;
+                self.cur_pipeline = None;
+            }
         }
     }
 }
@@ -611,7 +617,8 @@ impl Renderer {
             mipmap_filter: wgpu::FilterMode::Nearest,
             lod_min_clamp: 0.0,
             lod_max_clamp: 100.0,
-            compare: wgpu::CompareFunction::Undefined,
+            compare: None,
+            anisotropy_clamp: None,
         });
 
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -624,13 +631,15 @@ impl Renderer {
             mipmap_filter: wgpu::FilterMode::Linear,
             lod_min_clamp: 0.0,
             lod_max_clamp: 100.0,
-            compare: wgpu::CompareFunction::Undefined,
+            compare: None,
+            anisotropy_clamp: None,
         });
 
         let matrices_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mat4_viewmatrix"),
             size: std::mem::size_of::<Matrices>() as u64,
             usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            mapped_at_creation: false,
         });
 
         #[derive(Debug, Copy, Clone)]
@@ -654,14 +663,17 @@ impl Renderer {
             ambient_light: 0.0,
         };
 
-        let fragment_uniforms_buffer = device.create_buffer_with_data(
-            bytemuck::cast_slice(&[fragment_uniforms]),
-            wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
-        );
+        let fragment_uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&[fragment_uniforms]),
+                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            });
 
         let atlas_texture = [0, 0, 1, 1];
-        let msaa_verts = device.create_buffer_with_data(
-            bytemuck::cast_slice(&[
+        let msaa_verts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[
                 TexturedVertex {
                     pos: [-1., -1., 0., 1.],
                     tex_coord: [0., 1.],
@@ -693,8 +705,8 @@ impl Renderer {
                     atlas_texture,
                 },
             ]),
-            wgpu::BufferUsage::VERTEX,
-        );
+            usage: wgpu::BufferUsage::VERTEX,
+        });
 
         Self {
             out_size,
@@ -771,7 +783,7 @@ impl Renderer {
                 depth: 1,
             },
             mip_level_count: 1,
-            sample_count: 2 * self.msaa_factor() as u32,
+            sample_count: self.msaa_factor() as u32,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
@@ -780,7 +792,7 @@ impl Renderer {
 
         let depth_texture = device.create_texture(&depth_texture_desc);
 
-        depth_texture.create_default_view()
+        depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
     fn make_pipelines(&mut self, device: &wgpu::Device) {
@@ -868,8 +880,8 @@ impl Renderer {
 
             self.msaa_buffer = Some(MsaaBuffer {
                 factor: self.msaa_factor,
-                diffuse_buffer: buffer.create_default_view(),
-                light_buffer: light_buffer.create_default_view(),
+                diffuse_buffer: buffer.create_view(&wgpu::TextureViewDescriptor::default()),
+                light_buffer: light_buffer.create_view(&wgpu::TextureViewDescriptor::default()),
             });
 
             self.skybox_pipeline = None;
@@ -983,36 +995,35 @@ impl Renderer {
                     wgpu::RenderPassColorAttachmentDescriptor {
                         attachment: diffuse_buffer,
                         resolve_target: None,
-                        load_op: wgpu::LoadOp::Load,
-                        store_op: wgpu::StoreOp::Store,
-                        clear_color: wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
                         },
                     },
                     wgpu::RenderPassColorAttachmentDescriptor {
                         attachment: light_buffer,
                         resolve_target: None,
-                        load_op: wgpu::LoadOp::Clear,
-                        store_op: wgpu::StoreOp::Store,
-                        clear_color: wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }),
+                            store: true,
                         },
                     },
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachmentDescriptor {
                     attachment: &depth,
-                    depth_load_op: wgpu::LoadOp::Clear,
-                    depth_store_op: wgpu::StoreOp::Store,
-                    stencil_load_op: wgpu::LoadOp::Clear,
-                    stencil_store_op: wgpu::StoreOp::Store,
-                    clear_depth: 1.0,
-                    clear_stencil: 0,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: true,
+                    }),
                 }),
             });
 
@@ -1033,13 +1044,9 @@ impl Renderer {
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
                     attachment: screen_tex,
                     resolve_target: None,
-                    load_op: wgpu::LoadOp::Load,
-                    store_op: wgpu::StoreOp::Store,
-                    clear_color: wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
                     },
                 }],
                 depth_stencil_attachment: None,

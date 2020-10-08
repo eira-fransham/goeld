@@ -9,10 +9,11 @@ edition = "2018"
 [dependencies]
 bsp = { path = "./bsp" }
 collision = "0.20"
-wgpu = { git = "https://github.com/gfx-rs/wgpu-rs" }
+wgpu = "0.6"
 winit = "0.22"
 futures = "0.3"
 bytemuck = "1"
+lazy_static = "1.4"
 cgmath = "0.17"
 itertools = "0.9"
 fnv = "1"

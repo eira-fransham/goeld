@@ -1,5 +1,6 @@
 use image::{GenericImageView, Pixel};
 use rect_packer::{Config, Packer, Rect};
+use wgpu::util::DeviceExt;
 
 use crate::cache::{Cache, CacheCommon};
 
@@ -64,7 +65,7 @@ impl Atlas {
     }
 
     pub fn texture_view(&self) -> wgpu::TextureView {
-        self.texture.create_default_view()
+        self.texture.create_view(&Default::default())
     }
 
     pub fn width(&self) -> u32 {
@@ -90,8 +91,12 @@ impl Atlas {
             return Default::default();
         }
 
+        let aligned_width = match (each_width + self.padding * 2) % 64 {
+            0 => each_width,
+            other => each_width + (64 - other),
+        };
         let allocated_width =
-            iter.len() as u32 * each_width + (iter.len() as u32 - 1) * self.padding * 2;
+            iter.len() as u32 * aligned_width + (iter.len() as u32 - 1) * self.padding * 2;
 
         let rect = self
             .alloc
@@ -114,7 +119,7 @@ impl Atlas {
             debug_assert_eq!(height, each_height);
 
             for y in -pad..each_height as i32 + pad {
-                for x in -pad..each_width as i32 + pad {
+                for x in -pad..aligned_width as i32 + pad {
                     let src_x = x.min(width as i32 - 1).max(0) as u32;
                     let src_y = y.min(height as i32 - 1).max(0) as u32;
 
@@ -123,7 +128,7 @@ impl Atlas {
                 }
             }
 
-            let width = width as i32 + 2 * pad;
+            let width = aligned_width as i32 + 2 * pad;
             self.unwritten.push(Rect {
                 x: current_x,
                 y: rect.y - pad,
@@ -143,7 +148,7 @@ impl Atlas {
                 ..rect
             },
             all: rect,
-            stride_x: each_width as i32 + 2 * pad,
+            stride_x: aligned_width as i32 + 2 * pad,
         }
     }
 }
@@ -154,7 +159,11 @@ impl CacheCommon for Atlas {
     // TODO: Reuse the same buffer for transferring the data to the GPU, we don't need a new one every time.
     fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
         if !self.unwritten.is_empty() {
-            let buffer = device.create_buffer_with_data(&*self.cache, wgpu::BufferUsage::COPY_SRC);
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &*self.cache,
+                usage: wgpu::BufferUsage::COPY_SRC,
+            });
             let mut offset = 0;
 
             for rect in self.unwritten.drain(..) {

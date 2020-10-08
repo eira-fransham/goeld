@@ -1,5 +1,5 @@
 use crate::{
-    cache::{Atlas, Cache},
+    cache::{AppendManyResult, Atlas, Cache},
     loader::{Load, LoadAsset, Loader},
     render::{
         Light, PipelineDesc, Render, RenderCache, RenderMesh, TexturedVertex, VertexOffset,
@@ -30,7 +30,7 @@ pub struct World {
 
     cluster_lights: Vec<Range<u32>>,
 
-    light_probes: Vec<(cgmath::Vector3<f32>, crate::cache::AppendManyResult)>,
+    light_probes: Vec<(cgmath::Vector3<f32>, AppendManyResult)>,
 }
 
 const EMISSIVE_THRESHOLD: u32 = 10;
@@ -56,7 +56,7 @@ fn cluster_meshes<'a, F>(
         + 'a,
 )
 where
-    F: FnMut(&bsp::Q2Texture) -> Option<rect_packer::Rect>,
+    F: FnMut(&bsp::Q2Texture) -> Option<AppendManyResult>,
 {
     // We'll probably need to reallocate a few times since vertices are reused,
     // but this is a reasonable lower bound
@@ -70,7 +70,11 @@ where
             continue;
         };
 
-        let tex_rect = if let Some(tex_rect) = get_texture(&texture) {
+        let AppendManyResult {
+            first: tex_rect,
+            stride_x: texture_stride,
+            ..
+        } = if let Some(tex_rect) = get_texture(&texture) {
             tex_rect
         } else {
             continue;
@@ -114,6 +118,7 @@ where
                 WorldVertex {
                     count: texture.frames().count() as u32,
                     value: texture.value as f32 / 255.,
+                    texture_stride: texture_stride as u32,
                     lightmap_coord: lightmap
                         .map(|((minu, minv), lightmap_result)| {
                             [
@@ -122,7 +127,7 @@ where
                             ]
                         })
                         .unwrap_or_default(),
-                    lightmap_width: lightmap
+                    lightmap_stride: lightmap
                         .map(|(_, lightmap_result)| lightmap_result.stride_x as f32)
                         .unwrap_or_default(),
                     lightmap_count: count,
@@ -274,18 +279,18 @@ impl LoadAsset for BspAsset {
             }
         }
 
-        let missing = diffuse.append(
-            image::load(
-                std::io::Cursor::new(
-                    &include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/missing.png"))[..],
-                ),
-                image::ImageFormat::Png,
-            )
-            .unwrap(),
-        );
+        let missing = image::load(
+            std::io::Cursor::new(
+                &include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/missing.png"))[..],
+            ),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let missing =
+            diffuse.append_many(missing.width(), missing.height(), std::iter::once(missing));
 
         let loader = loader.textures();
-        let mut texture_map: HashMap<_, rect_packer::Rect> =
+        let mut texture_map: HashMap<_, AppendManyResult> =
             HashMap::with_capacity_and_hasher(bsp.textures.len(), Default::default());
 
         let bsp_ref = &bsp;
@@ -332,7 +337,7 @@ impl LoadAsset for BspAsset {
 
                         let appended = diffuse.append_many(width, height, frames.into_iter());
 
-                        Some(entry.insert(appended.first).clone())
+                        Some(entry.insert(appended).clone())
                     }
                 })();
 

@@ -6,6 +6,7 @@ use std::{
     mem,
     ops::{Deref, Range},
 };
+use wgpu::util::DeviceExt;
 
 pub struct AlignedBufferCache<T> {
     inner: BufferCache<u8>,
@@ -132,16 +133,18 @@ where
             if let Some(buffer) = &self.buffer {
                 let start_of_free = self.buffer_len * mem::size_of::<T>() as u64;
 
-                let mut new_buffer = device.create_buffer_mapped(&wgpu::BufferDescriptor {
+                let mut new_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
                     size: start_of_free + (self.unwritten.len() * mem::size_of::<T>()) as u64,
                     usage: self.buffer_usage | wgpu::BufferUsage::COPY_DST,
+                    mapped_at_creation: true,
                 });
 
-                new_buffer.data()[start_of_free as usize..]
+                new_buffer
+                    .slice(start_of_free as u64..)
+                    .get_mapped_range_mut()
                     .copy_from_slice(bytemuck::cast_slice(&self.unwritten));
-
-                let new_buffer = new_buffer.finish();
+                new_buffer.unmap();
 
                 encoder.copy_buffer_to_buffer(buffer, 0, &new_buffer, 0, start_of_free);
 
@@ -149,10 +152,13 @@ where
                 self.buffer = Some(new_buffer);
                 self.unwritten.clear();
             } else {
-                self.buffer = Some(device.create_buffer_with_data(
-                    bytemuck::cast_slice(&self.unwritten),
-                    self.buffer_usage,
-                ));
+                self.buffer = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: bytemuck::cast_slice(&self.unwritten),
+                        usage: self.buffer_usage,
+                    }),
+                );
                 self.buffer_len = self.unwritten.len() as u64;
                 self.unwritten.clear();
             }

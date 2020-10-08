@@ -1369,6 +1369,96 @@ impl<F: BspFormat> Vis<F> {
         self.leaf_index_at(root, point).and_then(|i| self.leaf(i))
     }
 
+    fn cast_ray_between(
+        &self,
+        root: Handle<'_, Self, Node>,
+        start: QVec,
+        end: QVec,
+    ) -> Option<QVec> {
+        let plane = root.plane()?;
+        let start_dot = if plane.type_ < 3 {
+            start.0[plane.type_ as usize] - plane.dist
+        } else {
+            start.dot(&plane.normal) - plane.dist
+        };
+        let end_dot = if plane.type_ < 3 {
+            end.0[plane.type_ as usize] - plane.dist
+        } else {
+            end.dot(&plane.normal) - plane.dist
+        };
+
+        let [front, back] = root.children;
+
+        if start_dot > 0. && end_dot > 0. {
+            let child: i32 = todo!();
+            let child = if front < 0 {
+                todo!()
+            } else {
+                self.node(child as usize)?
+            };
+
+            self.cast_ray_between(child, start, end)
+        } else if start_dot < 0. && end_dot < 0. {
+            let child: i32 = todo!();
+            let child = if back < 0 {
+                todo!()
+            } else {
+                self.node(child as usize)?
+            };
+
+            self.cast_ray_between(child, start, end)
+        } else {
+            todo!()
+        }
+    }
+
+    pub fn cast_ray<C, P: Into<V3<C>>, N: Into<V3<C>>>(
+        &self,
+        root: Handle<'_, Self, Node>,
+        point: P,
+        norm: N,
+    ) -> Option<QVec>
+    where
+        C: CoordSystem,
+    {
+        let point = C::into_qvec(point.into());
+        let norm = C::into_qvec(norm.into());
+
+        let plane = root.plane()?;
+        let dot = if plane.type_ < 3 {
+            point.0[plane.type_ as usize] - plane.dist
+        } else {
+            point.dot(&plane.normal) - plane.dist
+        };
+        let norm_dot = if plane.type_ < 3 {
+            norm.0[plane.type_ as usize] - plane.dist
+        } else {
+            norm.dot(&plane.normal) - plane.dist
+        };
+
+        let [front, back] = root.children;
+
+        if dot < 0. && norm_dot < 0. || dot > 0. && norm_dot > 0. {
+            let child = if norm_dot > 0. { front } else { back };
+            let child = if child < 0 {
+                todo!()
+            } else {
+                self.node(child as usize)?
+            };
+
+            self.cast_ray(child, point, norm)
+        } else {
+            let child = if norm_dot < 0. { front } else { back };
+            let child = if child < 0 {
+                todo!()
+            } else {
+                self.node(child as usize)?
+            };
+
+            self.cast_ray_between(child, point, norm * dot)
+        }
+    }
+
     #[inline]
     pub fn leaf_index_at<C, I: Into<V3<C>>>(
         &self,
@@ -1385,7 +1475,7 @@ impl<F: BspFormat> Vis<F> {
             let plane = current.plane()?;
             let norm: &QVec = &plane.normal;
 
-            let dot: f32 = if plane.type_ < 3 {
+            let dot = if plane.type_ < 3 {
                 point.0[plane.type_ as usize] - plane.dist
             } else {
                 point.dot(norm) - plane.dist
@@ -1512,7 +1602,8 @@ impl Vis<Quake2> {
 
     #[inline]
     pub fn visible_from(&self, a: u16, b: u16) -> bool {
-        a == b || self.visdata.vecs[self.visdata.cluster_offsets[a as usize].pvs as u64 * 8 + b as u64]
+        a == b
+            || self.visdata.vecs[self.visdata.cluster_offsets[a as usize].pvs as u64 * 8 + b as u64]
     }
 
     /// We use `impl TryInto` so that `-1` is transparently converted to "no visible clusters",

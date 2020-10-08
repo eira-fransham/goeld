@@ -289,7 +289,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     window.set_cursor_visible(!locked_mouse);
                     window.set_cursor_grab(locked_mouse).unwrap();
                 }
-                WindowEvent::CursorMoved { position, .. } => {}
                 WindowEvent::KeyboardInput {
                     input:
                         event::KeyboardInput {
@@ -306,11 +305,19 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     const MAX_INTENSITY: f32 = 20.0;
 
                     match keycode {
+                        event::VirtualKeyCode::R => {
+                            renderer.toggle_rtlights();
+                        }
+                        event::VirtualKeyCode::T => {
+                            renderer.toggle_fxaa();
+                        }
                         event::VirtualKeyCode::O => {
-                            renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
+                            renderer.set_fxaa_amount((renderer.fxaa_amount() / 2).max(1).min(32));
+                            // renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(32));
                         }
                         event::VirtualKeyCode::P => {
-                            renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
+                            renderer.set_fxaa_amount((renderer.fxaa_amount() * 2).max(1).min(32));
+                            // renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(32));
                         }
                         event::VirtualKeyCode::K => {
                             renderer

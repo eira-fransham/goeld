@@ -296,12 +296,64 @@ struct MsaaBuffer {
     light_buffer: wgpu::TextureView,
 }
 
+struct Uniforms<T> {
+    dirty: bool,
+    buffer: wgpu::Buffer,
+    value: T,
+}
+
+impl<T> Uniforms<T>
+where
+    T: bytemuck::Pod + std::cmp::PartialEq + Copy,
+{
+    pub fn new(value: T, device: &wgpu::Device) -> Self {
+        Self {
+            value,
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: std::mem::size_of::<T>() as u64,
+                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            dirty: true,
+        }
+    }
+
+    pub fn set(&mut self, value: T) {
+        if self.value != value {
+            self.value = value;
+            self.dirty = true;
+        }
+    }
+
+    pub fn get(&self) -> &T {
+        &self.value
+    }
+
+    pub fn update(&mut self, f: impl FnOnce(&mut T)) {
+        let mut value = self.value;
+        f(&mut value);
+
+        self.set(value);
+    }
+
+    pub fn write_if_dirty(&mut self, queue: &wgpu::Queue) {
+        if self.dirty {
+            self.dirty = false;
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.value]));
+        }
+    }
+
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+}
+
 pub struct Renderer {
     cache: RenderCache,
     matrices_buffer: wgpu::Buffer,
-    fragment_uniforms: FragmentUniforms,
-    fragment_uniforms_dirty: bool,
-    fragment_uniforms_buffer: wgpu::Buffer,
+    fragment_uniforms: Uniforms<FragmentUniforms>,
+    post_uniforms: Uniforms<PostUniforms>,
     out_size: (u32, u32),
     nearest_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
@@ -310,6 +362,7 @@ pub struct Renderer {
     model_pipeline: Option<pipelines::models::Pipeline>,
     rtlights_pipeline: Option<pipelines::rtlights::Pipeline>,
     post_pipeline: Option<pipelines::postprocess::Pipeline>,
+    rtlights_enabled: bool,
     msaa_factor: NonZeroU8,
     msaa_buffer: Option<MsaaBuffer>,
     msaa_verts: wgpu::Buffer,
@@ -533,7 +586,7 @@ where
             self.rpass.draw_indexed(range, 0, 0..1);
         }
 
-        if RTLIGHTS {
+        if self.renderer.rtlights_enabled {
             if let PipelineDesc::Models {
                 origin,
                 data_offset,
@@ -576,8 +629,20 @@ struct Matrices {
     projection: cgmath::Matrix4<f32>,
 }
 
+/// The view and projection matrices_buffer, used by the vertex shader.
+/// Since we only split these out to make implementing the sky
+/// shader simpler, the "projection matrix" actually includes
+/// rotation - we just don't do translation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+struct PostUniforms {
+    inv_resolution: cgmath::Vector2<f32>,
+    fxaa_enabled: bool,
+    fxaa_amount: u32,
+}
+
 /// The uniforms used by the
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 #[repr(C)]
 struct FragmentUniforms {
     /// The amount to exponentiate the output colour by
@@ -586,14 +651,15 @@ struct FragmentUniforms {
     intensity: f32,
     /// To get the x coord of the current texture, do `texture.x + (animation frame % count) * texture.width`
     animation_frame: u32,
-    /// So that animations know how much to offset by
-    atlas_padding: u32,
     /// Level of ambient light, for model shading
     ambient_light: f32,
 }
 
 unsafe impl Pod for Matrices {}
 unsafe impl Zeroable for Matrices {}
+
+unsafe impl Pod for PostUniforms {}
+unsafe impl Zeroable for PostUniforms {}
 
 unsafe impl Pod for FragmentUniforms {}
 unsafe impl Zeroable for FragmentUniforms {}
@@ -655,20 +721,24 @@ impl Renderer {
             counts[i] = Count(i as u32);
         }
 
-        let fragment_uniforms = FragmentUniforms {
-            inv_gamma: gamma.recip(),
-            intensity,
-            animation_frame: 0,
-            atlas_padding: 1,
-            ambient_light: 0.0,
-        };
+        let fragment_uniforms = Uniforms::new(
+            FragmentUniforms {
+                inv_gamma: gamma.recip(),
+                intensity,
+                animation_frame: 0,
+                ambient_light: 0.0,
+            },
+            device,
+        );
 
-        let fragment_uniforms_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&[fragment_uniforms]),
-                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
-            });
+        let post_uniforms = Uniforms::new(
+            PostUniforms {
+                inv_resolution: 1. / cgmath::Vector2::new(out_size.0 as f32, out_size.1 as f32),
+                fxaa_enabled: false,
+                fxaa_amount: 4,
+            },
+            device,
+        );
 
         let atlas_texture = [0, 0, 1, 1];
         let msaa_verts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -712,13 +782,13 @@ impl Renderer {
             out_size,
             matrices_buffer,
             fragment_uniforms,
-            fragment_uniforms_dirty: false,
-            fragment_uniforms_buffer,
+            post_uniforms,
             world_pipeline: None,
             skybox_pipeline: None,
             model_pipeline: None,
             rtlights_pipeline: None,
             post_pipeline: None,
+            rtlights_enabled: true,
             nearest_sampler,
             linear_sampler,
             cache,
@@ -734,7 +804,28 @@ impl Renderer {
             self.out_size = size;
             self.msaa_buffer = None;
             self.depth_buffer = None;
+            self.post_uniforms.update(|uniforms| {
+                uniforms.inv_resolution = 1. / cgmath::Vector2::new(size.0 as f32, size.1 as f32)
+            });
         }
+    }
+
+    pub fn toggle_rtlights(&mut self) {
+        self.rtlights_enabled = !self.rtlights_enabled;
+    }
+
+    pub fn toggle_fxaa(&mut self) {
+        self.post_uniforms
+            .update(|uniforms| uniforms.fxaa_enabled = !uniforms.fxaa_enabled);
+    }
+
+    pub fn set_fxaa_amount(&mut self, amount: u32) {
+        self.post_uniforms
+            .update(|uniforms| uniforms.fxaa_amount = amount);
+    }
+
+    pub fn fxaa_amount(&self) -> u32 {
+        self.post_uniforms.get().fxaa_amount
     }
 
     pub fn set_msaa_factor(&mut self, factor: u8) {
@@ -756,23 +847,21 @@ impl Renderer {
     }
 
     pub fn set_gamma(&mut self, gamma: f32) {
-        self.fragment_uniforms.inv_gamma = gamma.recip();
-        self.fragment_uniforms_dirty = true;
+        self.fragment_uniforms
+            .update(|uniforms| uniforms.inv_gamma = gamma.recip());
     }
 
     pub fn gamma(&self) -> f32 {
-        self.fragment_uniforms.inv_gamma.recip()
+        self.fragment_uniforms.get().inv_gamma.recip()
     }
 
     pub fn set_intensity(&mut self, intensity: f32) {
-        if self.fragment_uniforms.intensity != intensity {
-            self.fragment_uniforms.intensity = intensity;
-            self.fragment_uniforms_dirty = true;
-        }
+        self.fragment_uniforms
+            .update(|uniforms| uniforms.intensity = intensity);
     }
 
     pub fn intensity(&self) -> f32 {
-        self.fragment_uniforms.intensity
+        self.fragment_uniforms.get().intensity
     }
 
     fn make_depth_tex(&self, device: &wgpu::Device) -> wgpu::TextureView {
@@ -807,7 +896,7 @@ impl Renderer {
                 &self.nearest_sampler,
                 &self.linear_sampler,
                 &self.matrices_buffer,
-                &self.fragment_uniforms_buffer,
+                &self.fragment_uniforms.buffer(),
                 self.msaa_factor.get() as u32,
             ));
         }
@@ -818,7 +907,7 @@ impl Renderer {
                 &diffuse_atlas_view,
                 &self.linear_sampler,
                 &self.matrices_buffer,
-                &self.fragment_uniforms_buffer,
+                &self.fragment_uniforms.buffer(),
                 self.msaa_factor.get() as u32,
             ));
         }
@@ -829,7 +918,7 @@ impl Renderer {
                 &diffuse_atlas_view,
                 &self.linear_sampler,
                 &self.matrices_buffer,
-                &self.fragment_uniforms_buffer,
+                &self.fragment_uniforms.buffer(),
                 self.cache.model_data.as_ref().unwrap(),
                 self.msaa_factor.get() as u32,
             ));
@@ -839,7 +928,7 @@ impl Renderer {
             self.rtlights_pipeline = Some(pipelines::rtlights::build(
                 device,
                 &self.matrices_buffer,
-                &self.fragment_uniforms_buffer,
+                &self.fragment_uniforms.buffer(),
                 self.cache.model_data.as_ref().unwrap(),
                 self.msaa_factor.get() as u32,
             ));
@@ -898,7 +987,8 @@ impl Renderer {
                 diffuse_buffer,
                 light_buffer,
                 &self.linear_sampler,
-                &self.fragment_uniforms_buffer,
+                &self.post_uniforms.buffer(),
+                &self.fragment_uniforms.buffer(),
             ));
         }
     }
@@ -912,8 +1002,8 @@ impl Renderer {
     }
 
     pub fn advance_frame(&mut self) {
-        self.fragment_uniforms.animation_frame += 1;
-        self.fragment_uniforms_dirty = true;
+        self.fragment_uniforms
+            .update(|uniforms| uniforms.animation_frame += 1);
     }
 
     pub fn transfer_data<I>(&mut self, queue: &wgpu::Queue, items: I)
@@ -967,14 +1057,8 @@ impl Renderer {
             }]),
         );
 
-        if self.fragment_uniforms_dirty {
-            self.fragment_uniforms_dirty = false;
-            queue.write_buffer(
-                &self.fragment_uniforms_buffer,
-                0,
-                bytemuck::cast_slice(&[self.fragment_uniforms]),
-            );
-        }
+        self.fragment_uniforms.write_if_dirty(queue);
+        self.post_uniforms.write_if_dirty(queue);
 
         let depth = if let Some(depth) = &self.depth_buffer {
             depth

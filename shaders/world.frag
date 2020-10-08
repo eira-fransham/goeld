@@ -19,13 +19,14 @@ layout(binding = 4) uniform sampler s_Lightmap;
 layout(binding = 5) uniform Locals {
     vec2 _unused;
     uint animationFrame;
-    uint atlasPadding;
 };
 
 float ifLt(float a, float b, float ifTrue, float ifFalse) {
-    float lt = step(b, a);
+    // `step` is equivalent to <=, so this is equivalent to `a >= b`
+    // We want `a < b`, so we swap `ifFalse` and `ifTrue`.
+    float ge = step(b, a);
 
-    return ifFalse * lt + ifTrue * (1 - lt);
+    return ifFalse * ge + ifTrue * (1 - ge);
 }
 
 void main() {

@@ -66,6 +66,7 @@ pub mod world {
         static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
             wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/world.frag.spv"));
     }
+
     pub fn build(
         device: &wgpu::Device,
         diffuse_atlas_view: &wgpu::TextureView,
@@ -318,6 +319,7 @@ pub mod sky {
         static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
             wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/skybox.frag.spv"));
     }
+
     pub fn build(
         device: &wgpu::Device,
         diffuse_atlas_view: &wgpu::TextureView,
@@ -546,6 +548,7 @@ pub mod rtlights {
         static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
             wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/rtlights.frag.spv"));
     }
+
     pub fn build(
         device: &wgpu::Device,
         matrices: &wgpu::Buffer,
@@ -940,6 +943,7 @@ pub mod postprocess {
         diffuse_tex: &wgpu::TextureView,
         lights_tex: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        post_uniforms: &wgpu::Buffer,
         fragment_uniforms: &wgpu::Buffer,
     ) -> Pipeline {
         let vs_module = device.create_shader_module(VERTEX_SHADER.as_ref());
@@ -977,6 +981,15 @@ pub mod postprocess {
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::UniformBuffer {
+                        dynamic: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::UniformBuffer {
                         dynamic: false,
                         min_binding_size: None,
@@ -1062,6 +1075,10 @@ pub mod postprocess {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Buffer(fragment_uniforms.slice(..)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(post_uniforms.slice(..)),
                 },
             ],
         });

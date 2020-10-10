@@ -28,8 +28,6 @@ pub struct World {
     cluster_meta: Vec<ClusterMeta>,
     model_ranges: Vec<Range<u32>>,
 
-    cluster_lights: Vec<Range<u32>>,
-
     light_probes: Vec<(cgmath::Vector3<f32>, AppendManyResult)>,
 }
 
@@ -41,7 +39,6 @@ fn cluster_meshes<'a, F>(
     face_start_indices: &'a mut HashMap<u16, u32>,
     mut get_texture: F,
     lightmap_cache: &mut Atlas,
-    cluster_lights: &mut HashMap<u16, Vec<Light>>,
 ) -> (
     Vec<TexturedVertex>,
     Vec<WorldVertex>,
@@ -141,29 +138,6 @@ where
 
     let face_start_indices: &'a HashMap<_, _> = &*face_start_indices;
 
-    for leaf in bsp
-        .model(0)
-        .into_iter()
-        .flat_map(|model| model.leaves().into_iter().flatten())
-    {
-        for face in leaf.faces() {
-            if let (Some(tex), Some(cluster)) = (face.texture(), u16::try_from(leaf.cluster).ok()) {
-                if tex.value > EMISSIVE_THRESHOLD
-                    && !tex.flags.contains(bsp::SurfaceFlags::NODLIGHT)
-                    && !tex.flags.contains(bsp::SurfaceFlags::NODRAW)
-                    && !tex.flags.contains(bsp::SurfaceFlags::SKY)
-                {
-                    let [x, y, z] = face.center().0;
-
-                    cluster_lights.entry(cluster).or_default().push(Light {
-                        position: [x, y, z, 1.],
-                        color: [1., 1., 1., tex.value as f32],
-                    });
-                }
-            }
-        }
-    }
-
     (
         tex_vertices,
         world_vertices,
@@ -219,65 +193,8 @@ impl LoadAsset for BspAsset {
             textured_vertices,
             world_vertices,
             indices,
-            lights,
             ..
         } = cache;
-
-        let bsp_lights = bsp
-            .entities
-            .iter()
-            .filter(|ent| ent.properties().any(|kv| kv == ("classname", "light")))
-            .filter_map(|ent| {
-                ent.properties()
-                    .find_map(|(key, val)| if key == "origin" { Some(val) } else { None })
-                    .map(|origin| {
-                        (
-                            origin,
-                            ent.properties()
-                                .find_map(|(key, val)| {
-                                    if key.starts_with("light") {
-                                        val.parse::<f32>().ok()
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or(300.0),
-                        )
-                    })
-            })
-            .map(|(origin, light)| {
-                let pos = origin.find(' ').unwrap();
-                let x = origin[..pos].parse::<f32>().unwrap();
-                let origin = &origin[pos + 1..];
-
-                let pos = origin.find(' ').unwrap();
-                let y = origin[..pos].parse::<f32>().unwrap();
-                let origin = &origin[pos + 1..];
-
-                let z = origin.parse::<f32>().unwrap();
-
-                ([x, y, z], light)
-            })
-            .collect::<Vec<_>>();
-
-        let mut cluster_lights = HashMap::<u16, Vec<Light>>::with_hasher(Default::default());
-
-        for (pos, intensity) in bsp_lights {
-            if intensity < EMISSIVE_THRESHOLD as f32 {
-                continue;
-            }
-
-            let cluster = bsp
-                .vis
-                .cluster_at::<bsp::XEastYSouthZUp, _>(bsp.vis.root_node().unwrap(), pos);
-
-            if let Some(cluster) = cluster {
-                cluster_lights.entry(cluster).or_default().push(Light {
-                    position: [pos[0], pos[1], pos[2], 1.],
-                    color: [1., 1., 1., intensity].into(),
-                });
-            }
-        }
 
         let missing = image::load(
             std::io::Cursor::new(
@@ -348,13 +265,8 @@ impl LoadAsset for BspAsset {
         let (tex_vert_offset, world_vert_offset, model_ranges, cluster_meta) = {
             use std::convert::TryInto;
 
-            let (leaf_tex_vertices, leaf_world_vertices, mut model_indices) = cluster_meshes(
-                &bsp,
-                &mut buf,
-                &mut get_texture,
-                lightmap,
-                &mut cluster_lights,
-            );
+            let (leaf_tex_vertices, leaf_world_vertices, mut model_indices) =
+                cluster_meshes(&bsp, &mut buf, &mut get_texture, lightmap);
             let mut clusters = vec![
                 (vec![], Point3::from([0f32; 3]), Point3::from([0f32; 3]));
                 bsp.clusters().count()
@@ -428,38 +340,12 @@ impl LoadAsset for BspAsset {
             )
         };
 
-        let cluster_lights = bsp
-            .clusters()
-            .map(|cluster| {
-                let mut bsp_lights = cluster_lights
-                    .get(&cluster)
-                    .iter()
-                    .flat_map(|lights| lights.iter().cloned())
-                    .collect::<Vec<_>>();
-
-                bsp_lights.sort_unstable_by(|a, b| {
-                    let a_score = cgmath::Vector4::from(a.color).magnitude2();
-                    let b_score = cgmath::Vector4::from(b.color).magnitude2();
-
-                    b_score
-                        .partial_cmp(&a_score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                bsp_lights.truncate(crate::render::MAX_LIGHTS);
-
-                let range = lights.append(bsp_lights);
-
-                range.start as u32..range.end as u32
-            })
-            .collect();
-
         Ok(World {
             vis: bsp.vis,
             tex_vert_offset,
             world_vert_offset,
             cluster_meta,
             model_ranges,
-            cluster_lights,
             light_probes: vec![],
             last_cluster: None,
         })
@@ -587,24 +473,4 @@ impl Iterator for WorldLightIter<'_> {
     }
 }
 
-impl<'a> RenderWorld for &'a World {
-    type Lights = WorldLightIter<'a>;
-
-    #[inline]
-    fn lights(self, position: cgmath::Vector3<f32>) -> Self::Lights {
-        let pos: [f32; 3] = position.into();
-
-        let vis = &self.vis;
-
-        WorldLightIter {
-            clusters: hack::impl_trait_hack(
-                vis,
-                self.vis
-                    .model(0)
-                    .unwrap()
-                    .cluster_at::<bsp::XEastYSouthZUp, _>(pos),
-            ),
-            cluster_lights: &self.cluster_lights,
-        }
-    }
-}
+impl<'a> RenderWorld for &'a World {}

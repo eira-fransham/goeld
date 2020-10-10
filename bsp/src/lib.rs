@@ -453,7 +453,7 @@ bitflags! {
         /// Lighting from environment map
         const SKY         = 0b0000_0000_0000_0000_0100;
         /// Climbable ladder
-        const LADDER      = 0b0000_0000_0000_0000_1000;
+        const WARP        = 0b0000_0000_0000_0000_1000;
         /// Don't make missile explosions
         const NOIMPACT    = 0b0000_0000_0000_0001_0000;
         /// Don't leave missile marks
@@ -2071,11 +2071,12 @@ impl<'a> Handle<'a, Bsp, Face> {
 
     #[inline]
     pub fn lightmaps(self) -> Option<impl ExactSizeIterator<Item = LightmapRef<'a>>> {
-        if self
-            .texture()?
-            .flags
-            .intersects(SurfaceFlags::NOLIGHTMAP | SurfaceFlags::SKY | SurfaceFlags::NODRAW)
-        {
+        if self.texture()?.flags.intersects(
+            SurfaceFlags::WARP
+                | SurfaceFlags::NOLIGHTMAP
+                | SurfaceFlags::SKY
+                | SurfaceFlags::NODRAW,
+        ) {
             return None;
         }
 

@@ -55,13 +55,12 @@ layout(location = 5) in vec2 v_RgbM;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform texture2D t_Diffuse;
-layout(set = 0, binding = 1) uniform texture2D t_Lights;
-layout(set = 0, binding = 2) uniform sampler s_Color;
-layout(set = 0, binding = 3) uniform Locals {
+layout(set = 0, binding = 1) uniform sampler s_Color;
+layout(set = 0, binding = 2) uniform Locals {
     float invGamma;
     float intensity;
 };
-layout(set = 0, binding = 4) uniform PostLocals {
+layout(set = 0, binding = 3) uniform PostLocals {
     vec2 a_InvResolution;
     bool a_FxaaEnabled;
 };
@@ -123,26 +122,8 @@ vec3 ifBetween(float val, float min, float max, vec3 ifTrue, vec3 ifFalse) {
     return ifTrue * cond + ifFalse * (1 - cond);
 }
 
-vec4 sampleBothAndCombine(
-    texture2D diffuse,
-    texture2D lights,
-    sampler smp,
-    vec2 coord
-) {
-    vec4 diffuseColor = texture(sampler2D(diffuse, smp), coord);
-    vec4 lightsColor = texture(sampler2D(lights, smp), coord);
-    lightsColor.a = clamp(lightsColor.a, 0, 1);
-
-    return vec4(
-        diffuseColor.rgb * (1 - lightsColor.a) +
-            diffuseColor.rgb * lightsColor.rgb * lightsColor.a,
-        diffuseColor.a
-    );
-}
-
 vec3 fxaa(
     texture2D diffuse,
-    texture2D lights,
     sampler smp,
     vec2 fragCoord,
     vec2 invResolution,
@@ -151,11 +132,11 @@ vec3 fxaa(
     vec2 inRgbSW,
     vec2 inRgbSE
 ) {
-    vec3 rgbNW = sampleBothAndCombine(diffuse, lights, smp, inRgbNW).xyz;
-    vec3 rgbNE = sampleBothAndCombine(diffuse, lights, smp, inRgbNE).xyz;
-    vec3 rgbSW = sampleBothAndCombine(diffuse, lights, smp, inRgbSW).xyz;
-    vec3 rgbSE = sampleBothAndCombine(diffuse, lights, smp, inRgbSE).xyz;
-    vec3 rgbM  = sampleBothAndCombine(diffuse, lights, smp, fragCoord).xyz;
+    vec3 rgbNW = texture(sampler2D(diffuse, smp), inRgbNW).xyz;
+    vec3 rgbNE = texture(sampler2D(diffuse, smp), inRgbNE).xyz;
+    vec3 rgbSW = texture(sampler2D(diffuse, smp), inRgbSW).xyz;
+    vec3 rgbSE = texture(sampler2D(diffuse, smp), inRgbSE).xyz;
+    vec3 rgbM  = texture(sampler2D(diffuse, smp), fragCoord).xyz;
 
     float lumaNW = clamp(luminance(rgbNW), 0, 1);
     float lumaNE = clamp(luminance(rgbNE), 0, 1);
@@ -184,11 +165,11 @@ vec3 fxaa(
     ) * invResolution;
 
     vec3 rgbA = 0.5 * (
-        sampleBothAndCombine(diffuse, lights, smp, fragCoord + dir * (1.0 / 3.0 - 0.5)).xyz +
-        sampleBothAndCombine(diffuse, lights, smp, fragCoord + dir * (2.0 / 3.0 - 0.5)).xyz);
+        texture(sampler2D(diffuse, smp), fragCoord + dir * (1.0 / 3.0 - 0.5)).xyz +
+        texture(sampler2D(diffuse, smp), fragCoord + dir * (2.0 / 3.0 - 0.5)).xyz);
     vec3 rgbB = rgbA * 0.5 + 0.25 * (
-        sampleBothAndCombine(diffuse, lights, smp, fragCoord + dir * -0.5).xyz +
-        sampleBothAndCombine(diffuse, lights, smp, fragCoord + dir * 0.5).xyz);
+        texture(sampler2D(diffuse, smp), fragCoord + dir * -0.5).xyz +
+        texture(sampler2D(diffuse, smp), fragCoord + dir * 0.5).xyz);
 
     float lumaB = clamp(luminance(rgbB), 0, 1);
     // Equivalent to:
@@ -234,12 +215,11 @@ vec4 reinhard(vec4 color) {
 }
 
 void main() {
-    vec3 combined;
+    vec3 diffuse;
 
     if (a_FxaaEnabled) {
-        combined = fxaa(
+        diffuse = fxaa(
             t_Diffuse,
-            t_Lights,
             s_Color,
             v_TexCoord,
             a_InvResolution,
@@ -249,12 +229,8 @@ void main() {
             v_RgbSE
         );
     } else {
-        vec4 diffuse = texture(sampler2D(t_Diffuse, s_Color), v_TexCoord);
-        vec4 lights = texture(sampler2D(t_Lights, s_Color), v_TexCoord);
-        lights.a = clamp(lights.a, 0, 1);
-
-        combined = diffuse.rgb * (1 - lights.a) + diffuse.rgb * lights.rgb * lights.a;
+        diffuse = texture(sampler2D(t_Diffuse, s_Color), v_TexCoord).rgb;
     }
 
-    outColor = vec4(aces(combined * intensity), 1);
+    outColor = vec4(aces(diffuse * intensity), 1);
 }

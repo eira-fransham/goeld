@@ -164,20 +164,12 @@ pub mod world {
                 clamp_depth: false,
             }),
             primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-            color_states: &[
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor::REPLACE,
-                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                    write_mask: wgpu::ColorWrite::ALL,
-                },
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::LIGHT_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor::REPLACE,
-                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                    write_mask: wgpu::ColorWrite::ALL,
-                },
-            ],
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
             depth_stencil_state: Some(wgpu::DepthStencilStateDescriptor {
                 format: super::DEPTH_FORMAT,
                 depth_write_enabled: true,
@@ -397,28 +389,12 @@ pub mod sky {
                 clamp_depth: false,
             }),
             primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-            color_states: &[
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor::REPLACE,
-                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                    write_mask: wgpu::ColorWrite::ALL,
-                },
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::LIGHT_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor {
-                        src_factor: wgpu::BlendFactor::Zero,
-                        dst_factor: wgpu::BlendFactor::One,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha_blend: wgpu::BlendDescriptor {
-                        src_factor: wgpu::BlendFactor::Zero,
-                        dst_factor: wgpu::BlendFactor::One,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    write_mask: wgpu::ColorWrite::empty(),
-                },
-            ],
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
             depth_stencil_state: Some(wgpu::DepthStencilStateDescriptor {
                 format: super::DEPTH_FORMAT,
                 depth_write_enabled: false,
@@ -485,247 +461,6 @@ pub mod sky {
     }
 }
 
-// TODO: Use really low-res environment maps for lighting - this would probably also be useful to
-//       emulate HL1's fake "chrome" effect (although that might just be screen-space since HL1
-//       didn't have cubemaps).
-//
-// ------------------------------------------------------------------------------------------------
-// Process:
-//   Generate a bunch of probes
-//     (to start with we can just grab each leaf's midpoint but further down the line we'll need
-//     a better heuristic, we should absolutely have denser probes where there are more lights.
-//     Maybe keep generating new probes if the "initial probe" has a certain overall intensity
-//     or a certain differential in intensity between its faces)
-//   For each probe, allocate 6 rectangles in an atlas at really low res for each face of the
-//   cubemap (maybe 8x8px)
-//   Render skybox by doing a single pass where the whole cubemap has intensity calculated as
-//   its normal dot env light direction.
-//   Render world, so that any parts of the envmap where the sky isn't visible get correctly
-//   occluded.
-//     Here we can choose to either "properly" render the world (and get lovely bounce lighting)
-//     or ignore that and just render everything as black. The former might look anachronistic,
-//     but the way that lighting was implemented in these old engines is actually not so different,
-//     since it's based on the lightmap level at the character's feet.
-//   With additive blending, render all lights (using instancing) by calculating the dot of the
-//   cubemap's normal at each pixel and using that to calculate the correct light amount. For
-//   emissive faces, use area light-style calculation instead of pointlight calculation.
-//   When rendering models, blend between N cubemaps weighted by distance or distance squared
-//     (maybe best to do this with deferred shading?)
-//   Save envmap atlas and probe positions/clusters to external file so we don't need to regenerate
-//   it every time. Maybe include the map name and a hash of the bsp file itself so we can regen
-//   when the bsp changes.
-// ------------------------------------------------------------------------------------------------
-//
-// We can absolutely do this lazily, we don't even necessarily have to generate the probes upfront.
-// The only upfront work we absolutely need to do is cache the point lights (and spotlights for
-// Goldsrc). This might make serialising it to a file more complicated though.
-//
-// Since we're not really relying on the GLSL 3D vertex transformation pipeline, we could probably
-// do an entire cubemap in a single render. Without a geometry shader we couldn't do multiple
-// cubemaps in a single render, but it's unlikely that a geometry shader would be worth it
-// performance-wise. In fact, to remind myself later, there's a direct quote from someone on a
-// thread about geom shaders on Reddit that specifically says:
-// > All other cases I have personally tested, like using gs to render to multiple cubemap faces,
-// > we're slower than other techniques.
-//
-// From my approximations, we could store 1000 cubemaps at 8x8 per face (approx. 10 degree
-// granularity) in a 620x620 atlas, so probably a 1024x1024 atlas is more than enough. Since our
-// diffuse atlas and our lightmap atlases are both so small this is easily cheap enough to use.
-// There's nothing really stopping us from combining all our atlases into a single, large texture,
-// which would improve efficiency since less space would be wasted.
-pub mod rtlights {
-    use super::ShaderModuleSourceExt;
-    use lazy_static::lazy_static;
-
-    pub use super::Pipeline;
-    use crate::render::{Light, NormalVertex, TexturedVertex};
-    use memoffset::offset_of;
-    use std::mem;
-
-    lazy_static! {
-        static ref VERTEX_SHADER: wgpu::ShaderModuleSource<'static> =
-            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/rtlights.vert.spv"));
-        static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
-            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/rtlights.frag.spv"));
-    }
-
-    pub fn build(
-        device: &wgpu::Device,
-        matrices: &wgpu::Buffer,
-        fragment_uniforms: &wgpu::Buffer,
-        model_data: &wgpu::Buffer,
-        sample_count: u32,
-    ) -> Pipeline {
-        let vs_module = device.create_shader_module(VERTEX_SHADER.as_ref());
-        let fs_module = device.create_shader_module(FRAGMENT_SHADER.as_ref());
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bindgrouplayout_rtlights"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStage::VERTEX,
-                    ty: wgpu::BindingType::UniformBuffer {
-                        dynamic: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStage::VERTEX,
-                    ty: wgpu::BindingType::UniformBuffer {
-                        dynamic: true,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
-                    ty: wgpu::BindingType::UniformBuffer {
-                        dynamic: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            vertex_stage: wgpu::ProgrammableStageDescriptor {
-                module: &vs_module,
-                entry_point: "main",
-            },
-            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
-                module: &fs_module,
-                entry_point: "main",
-            }),
-            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
-                front_face: super::WINDING_MODE,
-                cull_mode: wgpu::CullMode::None,
-                depth_bias: -1,
-                depth_bias_slope_scale: 0.0,
-                depth_bias_clamp: 0.0,
-                clamp_depth: false,
-            }),
-            primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-            color_states: &[
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor {
-                        src_factor: wgpu::BlendFactor::Zero,
-                        dst_factor: wgpu::BlendFactor::One,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha_blend: wgpu::BlendDescriptor {
-                        src_factor: wgpu::BlendFactor::Zero,
-                        dst_factor: wgpu::BlendFactor::One,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    write_mask: wgpu::ColorWrite::empty(),
-                },
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::LIGHT_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::One,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                    write_mask: wgpu::ColorWrite::ALL,
-                },
-            ],
-            depth_stencil_state: Some(wgpu::DepthStencilStateDescriptor {
-                format: super::DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilStateDescriptor {
-                    front: wgpu::StencilStateFaceDescriptor::IGNORE,
-                    back: wgpu::StencilStateFaceDescriptor::IGNORE,
-                    read_mask: 0,
-                    write_mask: 0,
-                },
-            }),
-            vertex_state: wgpu::VertexStateDescriptor {
-                index_format: wgpu::IndexFormat::Uint32,
-                vertex_buffers: &[
-                    wgpu::VertexBufferDescriptor {
-                        stride: mem::size_of::<TexturedVertex>() as wgpu::BufferAddress,
-                        step_mode: wgpu::InputStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
-                            offset: offset_of!(TexturedVertex, pos) as u64,
-                            shader_location: 0,
-                        }],
-                    },
-                    wgpu::VertexBufferDescriptor {
-                        stride: mem::size_of::<NormalVertex>() as wgpu::BufferAddress,
-                        step_mode: wgpu::InputStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
-                            offset: offset_of!(NormalVertex, normal) as u64,
-                            shader_location: 3,
-                        }],
-                    },
-                    wgpu::VertexBufferDescriptor {
-                        stride: mem::size_of::<Light>() as wgpu::BufferAddress,
-                        step_mode: wgpu::InputStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttributeDescriptor {
-                                format: wgpu::VertexFormat::Float4,
-                                offset: offset_of!(Light, position) as u64,
-                                shader_location: 4,
-                            },
-                            wgpu::VertexAttributeDescriptor {
-                                format: wgpu::VertexFormat::Float4,
-                                offset: offset_of!(Light, color) as u64,
-                                shader_location: 5,
-                            },
-                        ],
-                    },
-                ],
-            },
-            sample_count,
-            sample_mask: !0,
-            alpha_to_coverage_enabled: false,
-        });
-
-        // Create bind group
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bindgroup_rtlights"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(matrices.slice(..)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(model_data.slice(..)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Buffer(fragment_uniforms.slice(..)),
-                },
-            ],
-        });
-
-        Pipeline {
-            bind_group,
-            pipeline,
-        }
-    }
-}
-
 pub mod models {
     use super::ShaderModuleSourceExt;
     use lazy_static::lazy_static;
@@ -757,7 +492,6 @@ pub mod models {
         diffuse_atlas_view: &wgpu::TextureView,
         diffuse_sampler: &wgpu::Sampler,
         matrices: &wgpu::Buffer,
-        fragment_uniforms: &wgpu::Buffer,
         model_data: &wgpu::Buffer,
         sample_count: u32,
     ) -> Pipeline {
@@ -830,20 +564,12 @@ pub mod models {
                 clamp_depth: false,
             }),
             primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-            color_states: &[
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor::REPLACE,
-                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                    write_mask: wgpu::ColorWrite::ALL,
-                },
-                wgpu::ColorStateDescriptor {
-                    format: super::postprocess::LIGHT_BUFFER_FORMAT,
-                    color_blend: wgpu::BlendDescriptor::REPLACE,
-                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                    write_mask: wgpu::ColorWrite::ALL,
-                },
-            ],
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
             depth_stencil_state: Some(wgpu::DepthStencilStateDescriptor {
                 format: super::DEPTH_FORMAT,
                 depth_write_enabled: true,
@@ -935,13 +661,11 @@ pub mod postprocess {
             wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/post.frag.spv"));
     }
 
-    pub const LIGHT_BUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
     pub const DIFFUSE_BUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg11b10Float;
 
     pub fn build(
         device: &wgpu::Device,
         diffuse_tex: &wgpu::TextureView,
-        lights_tex: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         post_uniforms: &wgpu::Buffer,
         fragment_uniforms: &wgpu::Buffer,
@@ -965,21 +689,11 @@ pub mod postprocess {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStage::FRAGMENT,
-                    ty: wgpu::BindingType::SampledTexture {
-                        multisampled: true,
-                        component_type: wgpu::TextureComponentType::Float,
-                        dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::Sampler { comparison: false },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
+                    binding: 2,
                     visibility: wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::UniformBuffer {
                         dynamic: false,
@@ -988,7 +702,7 @@ pub mod postprocess {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: 3,
                     visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::UniformBuffer {
                         dynamic: false,
@@ -1066,18 +780,14 @@ pub mod postprocess {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(lights_tex),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: 2,
                     resource: wgpu::BindingResource::Buffer(fragment_uniforms.slice(..)),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 3,
                     resource: wgpu::BindingResource::Buffer(post_uniforms.slice(..)),
                 },
             ],

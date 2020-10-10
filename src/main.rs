@@ -41,6 +41,17 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
+    let out_path = if cfg!(debug_assertions) {
+        use std::convert::TryFrom;
+
+        Some(
+            std::path::PathBuf::try_from(env!("CARGO_MANIFEST_DIR"))
+                .unwrap()
+                .join("calls.dbg"),
+        )
+    } else {
+        None
+    };
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
@@ -48,7 +59,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 limits: wgpu::Limits::default(),
                 shader_validation: cfg!(debug_assertions),
             },
-            None,
+            out_path.as_ref().map(|p| &**p),
         )
         .await
         .unwrap();
@@ -281,7 +292,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 WindowEvent::MouseInput {
                     state: event::ElementState::Pressed,
                     button: event::MouseButton::Left,
-                    device_id,
                     ..
                 } => {
                     locked_mouse = !locked_mouse;
@@ -305,17 +315,14 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     const MAX_INTENSITY: f32 = 20.0;
 
                     match keycode {
-                        event::VirtualKeyCode::R => {
-                            renderer.toggle_rtlights();
-                        }
                         event::VirtualKeyCode::T => {
                             renderer.toggle_fxaa();
                         }
                         event::VirtualKeyCode::O => {
-                            // renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(32));
+                            renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
                         }
                         event::VirtualKeyCode::P => {
-                            // renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(32));
+                            renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
                         }
                         event::VirtualKeyCode::K => {
                             renderer
@@ -358,8 +365,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 _ => {}
             },
             Event::DeviceEvent {
-                device_id,
                 event: DeviceEvent::MouseMotion { delta: (dx, dy) },
+                ..
             } if locked_mouse => {
                 let (dx, dy) = (dx as f32, dy as f32);
 
@@ -388,7 +395,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                             ctx.render(&model);
                         },
-                    ))
+                    ));
                 }
                 Err(_) => {
                     consecutive_timeouts += 1;

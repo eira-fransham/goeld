@@ -11,7 +11,7 @@ layout(location = 2) out vec2 v_RgbNE;
 layout(location = 3) out vec2 v_RgbSW;
 layout(location = 4) out vec2 v_RgbSE;
 
-layout(binding = 4) uniform Locals {
+layout(binding = 3) uniform Locals {
     vec2 u_InvResolution;
     bool u_FxaaEnabled;
 };

@@ -312,11 +312,9 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                             renderer.toggle_fxaa();
                         }
                         event::VirtualKeyCode::O => {
-                            renderer.set_fxaa_amount((renderer.fxaa_amount() / 2).max(1).min(32));
                             // renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(32));
                         }
                         event::VirtualKeyCode::P => {
-                            renderer.set_fxaa_amount((renderer.fxaa_amount() * 2).max(1).min(32));
                             // renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(32));
                         }
                         event::VirtualKeyCode::K => {

@@ -454,8 +454,6 @@ impl<W> Context for RenderContext<'_, W> {
     }
 }
 
-const RTLIGHTS: bool = false;
-
 impl<'pass, W> RenderContext<'pass, W>
 where
     W: World + Copy,
@@ -638,7 +636,6 @@ struct Matrices {
 struct PostUniforms {
     inv_resolution: cgmath::Vector2<f32>,
     fxaa_enabled: bool,
-    fxaa_amount: u32,
 }
 
 /// The uniforms used by the
@@ -735,7 +732,6 @@ impl Renderer {
             PostUniforms {
                 inv_resolution: 1. / cgmath::Vector2::new(out_size.0 as f32, out_size.1 as f32),
                 fxaa_enabled: false,
-                fxaa_amount: 4,
             },
             device,
         );
@@ -817,15 +813,6 @@ impl Renderer {
     pub fn toggle_fxaa(&mut self) {
         self.post_uniforms
             .update(|uniforms| uniforms.fxaa_enabled = !uniforms.fxaa_enabled);
-    }
-
-    pub fn set_fxaa_amount(&mut self, amount: u32) {
-        self.post_uniforms
-            .update(|uniforms| uniforms.fxaa_amount = amount);
-    }
-
-    pub fn fxaa_amount(&self) -> u32 {
-        self.post_uniforms.get().fxaa_amount
     }
 
     pub fn set_msaa_factor(&mut self, factor: u8) {

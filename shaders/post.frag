@@ -64,7 +64,6 @@ layout(set = 0, binding = 3) uniform Locals {
 layout(set = 0, binding = 4) uniform PostLocals {
     vec2 a_InvResolution;
     bool a_FxaaEnabled;
-    uint a_FxaaAmount;
 };
 
 float luminance(vec3 color) {
@@ -116,8 +115,6 @@ vec4 aces(vec4 color) {
 #endif
 
 vec3 ifBetween(float val, float min, float max, vec3 ifTrue, vec3 ifFalse) {
-    float offset = (max - min) / 8;
-
     float valGeMin = step(min, val);
     float valLeMax = step(val, max);
 

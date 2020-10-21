@@ -167,9 +167,9 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
+    let start = time::Instant::now();
     let mut last_update_inst = time::Instant::now();
     let mut last_render_inst = time::Instant::now();
-    let mut last_anim_frame = time::Instant::now();
 
     const FPS: f64 = 60.;
     const DT: f64 = 1. / FPS;
@@ -189,15 +189,11 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         *control_flow = ControlFlow::WaitUntil(
             (last_update_inst + update_dt)
                 .min(last_render_inst + render_dt)
-                .min(last_anim_frame + anim_dt),
         );
 
         let now = time::Instant::now();
 
-        if now - last_anim_frame >= anim_dt {
-            last_anim_frame = now;
-            renderer.advance_frame();
-        }
+        renderer.set_time((now - start).as_secs_f32());
 
         let mut elapsed = now - last_update_inst;
 

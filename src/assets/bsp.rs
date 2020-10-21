@@ -27,8 +27,6 @@ pub struct World {
     // Key is `(model, cluster)`
     cluster_meta: Vec<ClusterMeta>,
     model_ranges: Vec<Range<u32>>,
-
-    light_probes: Vec<(cgmath::Vector3<f32>, AppendManyResult)>,
 }
 
 const EMISSIVE_THRESHOLD: u32 = 10;
@@ -101,6 +99,8 @@ where
                 vert.dot(&texture.offsets.axis_u) + texture.offsets.offset_u,
                 vert.dot(&texture.offsets.axis_v) + texture.offsets.offset_v,
             );
+            let anim_count = texture.frames().count() as i32;
+
             (
                 TexturedVertex {
                     pos: [vert.x(), vert.y(), vert.z(), 1.],
@@ -113,7 +113,11 @@ where
                     ],
                 },
                 WorldVertex {
-                    count: texture.frames().count() as u32,
+                    count: if texture.flags.contains(bsp::SurfaceFlags::WARP) {
+                        -anim_count
+                    } else {
+                        anim_count
+                    },
                     value: texture.value as f32 / 255.,
                     texture_stride: texture_stride as u32,
                     lightmap_coord: lightmap
@@ -346,7 +350,6 @@ impl LoadAsset for BspAsset {
             world_vert_offset,
             cluster_meta,
             model_ranges,
-            light_probes: vec![],
             last_cluster: None,
         })
     }

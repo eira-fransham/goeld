@@ -1,7 +1,7 @@
 #version 450
 #pragma shader_stage(fragment)
 
-layout(location = 0) in vec2 v_TexCoord;
+layout(location = 0) in vec4 v_TexCoord;
 layout(location = 1) in flat uvec4 v_Tex;
 
 layout(location = 0) out vec4 outColor;

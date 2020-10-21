@@ -404,7 +404,7 @@ unsafe impl Zeroable for TexturedVertex {}
 pub struct WorldVertex {
     /// For animated textures (TODO: We can split this out even further since 99% of faces have
     /// non-animated textures)
-    pub count: u32,
+    pub count: i32,
     pub texture_stride: u32,
     pub lightmap_coord: [f32; 2],
     pub lightmap_stride: f32,
@@ -599,7 +599,7 @@ struct FragmentUniforms {
     /// The amount to multiply the output colour by
     intensity: f32,
     /// To get the x coord of the current texture, do `texture.x + (animation frame % count) * texture.width`
-    animation_frame: u32,
+    animation_frame: f32,
     /// Level of ambient light, for model shading
     ambient_light: f32,
 }
@@ -674,7 +674,7 @@ impl Renderer {
             FragmentUniforms {
                 inv_gamma: gamma.recip(),
                 intensity,
-                animation_frame: 0,
+                animation_frame: 0.,
                 ambient_light: 0.0,
             },
             device,
@@ -903,9 +903,9 @@ impl Renderer {
         &self.cache
     }
 
-    pub fn advance_frame(&mut self) {
+    pub fn set_time(&mut self, time: f32) {
         self.fragment_uniforms
-            .update(|uniforms| uniforms.animation_frame += 1);
+            .update(|uniforms| uniforms.animation_frame = time);
     }
 
     pub fn transfer_data<I>(&mut self, queue: &wgpu::Queue, items: I)

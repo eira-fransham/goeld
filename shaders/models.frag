@@ -1,5 +1,6 @@
 #version 450
 #pragma shader_stage(fragment)
+#pragma optimize(on)
 
 layout(location = 0) in vec4 v_TexCoord;
 layout(location = 1) in flat uvec4 v_Tex;

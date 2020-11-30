@@ -133,7 +133,7 @@ where
             if let Some(buffer) = &self.buffer {
                 let start_of_free = self.buffer_len * mem::size_of::<T>() as u64;
 
-                let mut new_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                let new_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
                     size: start_of_free + (self.unwritten.len() * mem::size_of::<T>()) as u64,
                     usage: self.buffer_usage | wgpu::BufferUsage::COPY_DST,

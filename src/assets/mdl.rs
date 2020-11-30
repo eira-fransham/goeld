@@ -2,7 +2,7 @@ use crate::{
     cache::Cache,
     loader::{LoadAsset, Loader},
     render::{
-        ModelData, NormalVertex, PipelineDesc, Render, RenderCache, RenderMesh, TexturedVertex,
+        ModelData, ModelVertex, PipelineDesc, Render, RenderCache, RenderMesh, TexturedVertex,
         TransferData, VertexOffset,
     },
 };
@@ -29,6 +29,14 @@ impl Model {
         self.position += by;
         self.position_dirty = true;
     }
+}
+
+// We don't support scaling, and the order is always: rotate around bone origin, translate
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Bone {
+    pub origin: [f32; 3],
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
 }
 
 impl LoadAsset for MdlAsset<'_> {
@@ -61,7 +69,7 @@ impl LoadAsset for MdlAsset<'_> {
             }
         }
 
-        const ASSUME_SIMPLE_TEXTURES:bool = true;
+        const ASSUME_SIMPLE_TEXTURES: bool = true;
 
         let loader = loader.textures();
 
@@ -160,11 +168,12 @@ impl LoadAsset for MdlAsset<'_> {
 
                 assert!(normals.len() > 0);
 
-                cache.normal_vertices.append(normals.map(move |norm| {
+                cache.model_vertices.append(normals.map(move |norm| {
                     let norm: cgmath::Vector3<f32> = norm.into();
                     let norm = transform.transform_vector(norm);
-                    NormalVertex {
+                    ModelVertex {
                         normal: norm.into(),
+                        bones: [-1; 2],
                     }
                 }));
 
@@ -188,7 +197,7 @@ impl LoadAsset for MdlAsset<'_> {
         }
 
         let vert_offset = cache.textured_vertices.len();
-        let norm_offset = cache.normal_vertices.len();
+        let norm_offset = cache.model_vertices.len();
 
         let mut index_ranges = Vec::new();
 
@@ -242,7 +251,7 @@ impl TransferData for &'_ Model {
 
 impl<'a> Render for &'a Model {
     type Indices = std::iter::Cloned<std::slice::Iter<'a, Range<u32>>>;
-    type Offsets = (VertexOffset<TexturedVertex>, VertexOffset<NormalVertex>);
+    type Offsets = (VertexOffset<TexturedVertex>, VertexOffset<ModelVertex>);
 
     fn indices<T: crate::render::Context>(
         self,

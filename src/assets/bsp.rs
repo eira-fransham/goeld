@@ -2,7 +2,7 @@ use crate::{
     cache::{AppendManyResult, Atlas, Cache},
     loader::{Load, LoadAsset, Loader},
     render::{
-        Light, PipelineDesc, Render, RenderCache, RenderMesh, TexturedVertex, VertexOffset,
+        PipelineDesc, Render, RenderCache, RenderMesh, TexturedVertex, VertexOffset,
         World as RenderWorld, WorldVertex,
     },
 };
@@ -451,28 +451,6 @@ impl<'a> Render for &'a mut World {
             },
             pipeline: PipelineDesc::World,
         }
-    }
-}
-
-#[derive(Clone)]
-pub struct WorldLightIter<'a> {
-    clusters: hack::ImplTraitHack<'a>,
-    cluster_lights: &'a [Range<u32>],
-}
-
-impl Iterator for WorldLightIter<'_> {
-    type Item = Range<u32>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let Self {
-            clusters,
-            cluster_lights,
-        } = self;
-
-        clusters
-            .filter_map(move |cluster| cluster_lights.get(cluster as usize).cloned())
-            .next()
     }
 }
 

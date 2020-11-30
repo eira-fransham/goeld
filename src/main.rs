@@ -1,5 +1,4 @@
-#![feature(osstring_ascii, const_generics, type_alias_impl_trait)]
-
+#![feature(osstring_ascii, const_generics, type_alias_impl_trait, async_closure)]
 extern crate open_asset_importer as assimp;
 
 use bsp::Bsp;
@@ -7,10 +6,12 @@ use bsp::Bsp;
 use fnv::FnvHashSet as HashSet;
 use std::{iter, time};
 use winit::{
-    event::{self, DeviceEvent, Event, WindowEvent},
+    event::{self, DeviceEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
+    platform::unix::EventLoopExtUnix,
     window::Window,
 };
+use winit_async::{EventAsync as Event, EventLoopAsync};
 
 #[global_allocator]
 #[cfg(feature = "jemallocator")]
@@ -185,11 +186,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut consecutive_timeouts = 0usize;
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(
-            (last_update_inst + update_dt)
-                .min(last_render_inst + render_dt)
-        );
+    event_loop.run_async(async move |mut runner| 'main: loop {
+        runner.wait().await;
 
         let now = time::Instant::now();
 
@@ -247,131 +245,143 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
             last_update_inst = now - elapsed;
         }
 
-        match event {
-            Event::MainEventsCleared => {
-                if now - last_render_inst > render_dt {
-                    window.request_redraw();
-                    last_render_inst = time::Instant::now();
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                ..
-            } => {
-                sc_desc.width = size.width;
-                sc_desc.height = size.height;
-                swap_chain = device.create_swap_chain(&surface, &sc_desc);
-
-                camera.set_aspect_ratio(sc_desc.width, sc_desc.height);
-
-                renderer.set_size(size.into());
-            }
-
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
-                    *control_flow = ControlFlow::Exit;
-                }
-
-                WindowEvent::KeyboardInput {
-                    input:
-                        event::KeyboardInput {
-                            virtual_keycode: Some(event::VirtualKeyCode::Escape),
-                            state: event::ElementState::Pressed,
-                            ..
-                        },
+        let mut events = runner.recv_events().await;
+        while let Some(event) = events.next().await {
+            match event {
+                Event::WindowEvent {
+                    event: WindowEvent::Resized(size),
                     ..
                 } => {
-                    locked_mouse = false;
-                    window.set_cursor_grab(false).unwrap();
-                    window.set_cursor_visible(true);
+                    sc_desc.width = size.width;
+                    sc_desc.height = size.height;
+                    swap_chain = device.create_swap_chain(&surface, &sc_desc);
+
+                    camera.set_aspect_ratio(sc_desc.width, sc_desc.height);
+
+                    renderer.set_size(size.into());
                 }
-                WindowEvent::MouseInput {
-                    state: event::ElementState::Pressed,
-                    button: event::MouseButton::Left,
-                    ..
-                } => {
-                    locked_mouse = !locked_mouse;
 
-                    window.set_cursor_visible(!locked_mouse);
-                    window.set_cursor_grab(locked_mouse).unwrap();
-                }
-                WindowEvent::KeyboardInput {
-                    input:
-                        event::KeyboardInput {
-                            virtual_keycode: Some(keycode),
-                            state: event::ElementState::Pressed,
-                            ..
-                        },
-                    ..
-                } => {
-                    const MIN_GAMMA: f32 = 0.1;
-                    const MAX_GAMMA: f32 = 8.0;
+                Event::WindowEvent { event, .. } => match event {
+                    WindowEvent::CloseRequested => {
+                        break 'main;
+                    }
 
-                    const MIN_INTENSITY: f32 = 0.1;
-                    const MAX_INTENSITY: f32 = 20.0;
+                    WindowEvent::KeyboardInput {
+                        input:
+                            event::KeyboardInput {
+                                virtual_keycode: Some(event::VirtualKeyCode::Escape),
+                                state: event::ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } => {
+                        locked_mouse = false;
+                        window.set_cursor_grab(false).unwrap();
+                        window.set_cursor_visible(true);
+                    }
+                    WindowEvent::MouseInput {
+                        state: event::ElementState::Pressed,
+                        button: event::MouseButton::Left,
+                        ..
+                    } => {
+                        locked_mouse = !locked_mouse;
 
-                    match keycode {
-                        event::VirtualKeyCode::T => {
-                            renderer.toggle_fxaa();
-                        }
-                        event::VirtualKeyCode::O => {
-                            renderer.set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
-                        }
-                        event::VirtualKeyCode::P => {
-                            renderer.set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
-                        }
-                        event::VirtualKeyCode::K => {
-                            renderer
-                                .set_gamma((renderer.gamma() - 0.05).max(MIN_GAMMA).min(MAX_GAMMA));
-                        }
-                        event::VirtualKeyCode::L => {
-                            renderer
-                                .set_gamma((renderer.gamma() + 0.05).max(MIN_GAMMA).min(MAX_GAMMA));
-                        }
-                        event::VirtualKeyCode::H => {
-                            renderer.set_intensity(
-                                (renderer.intensity() - 0.2)
-                                    .max(MIN_INTENSITY)
-                                    .min(MAX_INTENSITY),
-                            );
-                        }
-                        event::VirtualKeyCode::J => {
-                            renderer.set_intensity(
-                                (renderer.intensity() + 0.2)
-                                    .max(MIN_INTENSITY)
-                                    .min(MAX_INTENSITY),
-                            );
-                        }
-                        keycode => {
-                            keys_down.insert(keycode);
+                        window.set_cursor_visible(!locked_mouse);
+                        window.set_cursor_grab(locked_mouse).unwrap();
+                    }
+                    WindowEvent::KeyboardInput {
+                        input:
+                            event::KeyboardInput {
+                                virtual_keycode: Some(keycode),
+                                state: event::ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } => {
+                        const MIN_GAMMA: f32 = 0.1;
+                        const MAX_GAMMA: f32 = 8.0;
+
+                        const MIN_INTENSITY: f32 = 0.1;
+                        const MAX_INTENSITY: f32 = 20.0;
+
+                        match keycode {
+                            event::VirtualKeyCode::T => {
+                                renderer.toggle_fxaa();
+                            }
+                            event::VirtualKeyCode::O => {
+                                renderer
+                                    .set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
+                            }
+                            event::VirtualKeyCode::P => {
+                                renderer
+                                    .set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
+                            }
+                            event::VirtualKeyCode::K => {
+                                renderer.set_gamma(
+                                    (renderer.gamma() - 0.05).max(MIN_GAMMA).min(MAX_GAMMA),
+                                );
+                            }
+                            event::VirtualKeyCode::L => {
+                                renderer.set_gamma(
+                                    (renderer.gamma() + 0.05).max(MIN_GAMMA).min(MAX_GAMMA),
+                                );
+                            }
+                            event::VirtualKeyCode::H => {
+                                renderer.set_intensity(
+                                    (renderer.intensity() - 0.2)
+                                        .max(MIN_INTENSITY)
+                                        .min(MAX_INTENSITY),
+                                );
+                            }
+                            event::VirtualKeyCode::J => {
+                                renderer.set_intensity(
+                                    (renderer.intensity() + 0.2)
+                                        .max(MIN_INTENSITY)
+                                        .min(MAX_INTENSITY),
+                                );
+                            }
+                            keycode => {
+                                keys_down.insert(keycode);
+                            }
                         }
                     }
-                }
-                WindowEvent::KeyboardInput {
-                    input:
-                        event::KeyboardInput {
-                            virtual_keycode: Some(keycode),
-                            state: event::ElementState::Released,
-                            ..
-                        },
+                    WindowEvent::KeyboardInput {
+                        input:
+                            event::KeyboardInput {
+                                virtual_keycode: Some(keycode),
+                                state: event::ElementState::Released,
+                                ..
+                            },
+                        ..
+                    } => {
+                        keys_down.remove(&keycode);
+                    }
+                    _ => {}
+                },
+                Event::DeviceEvent {
+                    event: DeviceEvent::MouseMotion { delta: (dx, dy) },
                     ..
-                } => {
-                    keys_down.remove(&keycode);
+                } if locked_mouse => {
+                    let (dx, dy) = (dx as f32, dy as f32);
+
+                    camera.update_pitch(|p| p + cgmath::Deg::from(cgmath::Rad(dy / 100.0)));
+                    camera.update_yaw(|y| y - cgmath::Deg::from(cgmath::Rad(dx / 100.0)));
                 }
                 _ => {}
-            },
-            Event::DeviceEvent {
-                event: DeviceEvent::MouseMotion { delta: (dx, dy) },
-                ..
-            } if locked_mouse => {
-                let (dx, dy) = (dx as f32, dy as f32);
-
-                camera.update_pitch(|p| p + cgmath::Deg::from(cgmath::Rad(dy / 100.0)));
-                camera.update_yaw(|y| y - cgmath::Deg::from(cgmath::Rad(dx / 100.0)));
             }
-            Event::RedrawRequested(_) => match swap_chain.get_current_frame() {
+        }
+
+        let mut redraw_requests = events.redraw_requests().await;
+        while let Some(_window_id) = redraw_requests.next().await {
+            last_render_inst = now;
+
+            match swap_chain.get_current_frame() {
                 Ok(frame) => {
                     consecutive_timeouts = 0;
+
+                    let fut = renderer.prepare();
+                    device.poll(wgpu::Maintain::Poll);
+                    fut.await.expect("Prepare buffers failed");
 
                     renderer.transfer_data(&queue, std::iter::once(&model));
 
@@ -403,9 +413,13 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                         );
                     }
                 }
-            },
-            _ => {}
+            }
         }
+
+        let _ = runner
+            .wait_until((last_update_inst + update_dt).min(last_render_inst + render_dt))
+            .await;
+        window.request_redraw();
     });
 }
 
@@ -421,7 +435,7 @@ fn main() {
     )
     .unwrap();
 
-    let events = EventLoop::new();
+    let events = EventLoop::new_any_thread();
     let window = Window::new(&events).unwrap();
 
     futures::executor::block_on(run(loader, bsp, events, window));

@@ -1,4 +1,4 @@
-use crate::cache::{AlignedBufferCache, Atlas, BufferCache, CacheCommon};
+use crate::cache::{AlignedBufferCache, Atlas, BufferCache, BufferCacheMut, CacheCommon};
 use bytemuck::{Pod, Zeroable};
 use std::{convert::TryFrom, iter, mem, num::NonZeroU8, ops::Range};
 use wgpu::util::DeviceExt;
@@ -87,13 +87,14 @@ pub struct RenderCache {
     pub diffuse: Atlas,
     pub lightmap: Atlas,
 
-    pub normal_vertices: BufferCache<NormalVertex>,
+    pub model_vertices: BufferCache<ModelVertex>,
     pub textured_vertices: BufferCache<TexturedVertex>,
     pub world_vertices: BufferCache<WorldVertex>,
 
     pub indices: BufferCache<u32>,
 
     pub model_data: AlignedBufferCache<ModelData>,
+    pub bone_matrices: BufferCacheMut<[[f32; 4]; 4]>,
 }
 
 impl RenderCache {
@@ -131,7 +132,7 @@ impl RenderCache {
                 1,
             ),
 
-            normal_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
+            model_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
             textured_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
             world_vertices: BufferCache::new(wgpu::BufferUsage::VERTEX),
 
@@ -141,7 +142,43 @@ impl RenderCache {
                 wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
                 MINIMUM_ALIGNMENT as u16,
             ),
+            bone_matrices: BufferCacheMut::new(
+                wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            ),
         }
+    }
+
+    async fn update_buffers(&mut self) -> Result<(), wgpu::BufferAsyncError> {
+        let (
+            diffuse_res,
+            lightmap_res,
+            textured_vertices_res,
+            world_vertices_res,
+            model_vertices_res,
+            indices_res,
+            model_data_res,
+            bone_matrices_res,
+        ) = futures::join!(
+            self.diffuse.update_buffers(),
+            self.lightmap.update_buffers(),
+            self.textured_vertices.update_buffers(),
+            self.world_vertices.update_buffers(),
+            self.model_vertices.update_buffers(),
+            self.indices.update_buffers(),
+            self.model_data.update_buffers(),
+            self.bone_matrices.update_buffers(),
+        );
+
+        diffuse_res?;
+        lightmap_res?;
+        textured_vertices_res?;
+        world_vertices_res?;
+        model_vertices_res?;
+        indices_res?;
+        model_data_res?;
+        bone_matrices_res?;
+
+        Ok(())
     }
 
     fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
@@ -150,11 +187,12 @@ impl RenderCache {
 
         self.textured_vertices.update(device, encoder);
         self.world_vertices.update(device, encoder);
-        self.normal_vertices.update(device, encoder);
+        self.model_vertices.update(device, encoder);
 
         self.indices.update(device, encoder);
 
         self.model_data.update(device, encoder);
+        self.bone_matrices.update(device, encoder);
     }
 }
 
@@ -193,7 +231,7 @@ impl<T> From<u64> for VertexOffset<T> {
 pub struct RenderOffsets(
     pub Option<VertexOffset<TexturedVertex>>,
     pub Option<VertexOffset<WorldVertex>>,
-    pub Option<VertexOffset<NormalVertex>>,
+    pub Option<VertexOffset<ModelVertex>>,
 );
 
 impl From<VertexOffset<TexturedVertex>> for RenderOffsets {
@@ -208,8 +246,8 @@ impl From<VertexOffset<WorldVertex>> for RenderOffsets {
     }
 }
 
-impl From<VertexOffset<NormalVertex>> for RenderOffsets {
-    fn from(other: VertexOffset<NormalVertex>) -> Self {
+impl From<VertexOffset<ModelVertex>> for RenderOffsets {
+    fn from(other: VertexOffset<ModelVertex>) -> Self {
         Self(None, None, Some(other))
     }
 }
@@ -220,8 +258,8 @@ impl From<(VertexOffset<TexturedVertex>, VertexOffset<WorldVertex>)> for RenderO
     }
 }
 
-impl From<(VertexOffset<TexturedVertex>, VertexOffset<NormalVertex>)> for RenderOffsets {
-    fn from(other: (VertexOffset<TexturedVertex>, VertexOffset<NormalVertex>)) -> Self {
+impl From<(VertexOffset<TexturedVertex>, VertexOffset<ModelVertex>)> for RenderOffsets {
+    fn from(other: (VertexOffset<TexturedVertex>, VertexOffset<ModelVertex>)) -> Self {
         Self(Some(other.0), None, Some(other.1))
     }
 }
@@ -242,17 +280,6 @@ pub enum PipelineDesc {
         data_offset: wgpu::BufferAddress,
     },
 }
-
-#[derive(PartialEq, Debug, Clone, Copy)]
-#[repr(C)]
-pub struct Light {
-    pub position: [f32; 4],
-    /// R, G, B, intensity
-    pub color: [f32; 4],
-}
-
-unsafe impl Pod for Light {}
-unsafe impl Zeroable for Light {}
 
 pub trait Render {
     type Indices: Iterator<Item = Range<u32>> + Clone;
@@ -348,7 +375,7 @@ pub struct Renderer {
     model_pipeline: Option<pipelines::models::Pipeline>,
     post_pipeline: Option<pipelines::postprocess::Pipeline>,
     msaa_factor: NonZeroU8,
-    msaa_buffer: Option<MsaaBuffer>,
+    post_buffer: Option<MsaaBuffer>,
     msaa_verts: wgpu::Buffer,
     depth_buffer: Option<wgpu::TextureView>,
 }
@@ -377,12 +404,13 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 );
 
 #[derive(Debug, Clone, Copy)]
-pub struct NormalVertex {
+pub struct ModelVertex {
     pub normal: [f32; 3],
+    pub bones: [i8; 2],
 }
 
-unsafe impl Pod for NormalVertex {}
-unsafe impl Zeroable for NormalVertex {}
+unsafe impl Pod for ModelVertex {}
+unsafe impl Zeroable for ModelVertex {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TexturedVertex {
@@ -550,10 +578,10 @@ where
                 return;
             }
         } else if let Some(norm_o) = norm_o {
-            if let Some(verts) = &*self.renderer.cache().normal_vertices {
+            if let Some(verts) = &*self.renderer.cache().model_vertices {
                 self.rpass.set_vertex_buffer(
                     1,
-                    verts.slice(norm_o.id * mem::size_of::<NormalVertex>() as u64..),
+                    verts.slice(norm_o.id * mem::size_of::<ModelVertex>() as u64..),
                 );
             } else {
                 return;
@@ -618,8 +646,6 @@ const MINIMUM_ALIGNMENT: usize = 256;
 
 impl Renderer {
     pub fn init(device: &wgpu::Device, out_size: (u32, u32), gamma: f32, intensity: f32) -> Self {
-        assert_eq!(std::mem::size_of::<Light>(), 8 * 4);
-
         let cache = RenderCache::new(device);
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -739,7 +765,7 @@ impl Renderer {
             linear_sampler,
             cache,
             msaa_factor: NonZeroU8::new(1).unwrap(),
-            msaa_buffer: None,
+            post_buffer: None,
             msaa_verts,
             depth_buffer: None,
         }
@@ -748,7 +774,7 @@ impl Renderer {
     pub fn set_size(&mut self, size: (u32, u32)) {
         if size != self.out_size {
             self.out_size = size;
-            self.msaa_buffer = None;
+            self.post_buffer = None;
             self.depth_buffer = None;
             self.post_uniforms.update(|uniforms| {
                 uniforms.inv_resolution = 1. / cgmath::Vector2::new(size.0 as f32, size.1 as f32)
@@ -764,13 +790,13 @@ impl Renderer {
     pub fn set_msaa_factor(&mut self, factor: u8) {
         self.msaa_factor = NonZeroU8::new(factor).unwrap();
         if self
-            .msaa_buffer
+            .post_buffer
             .as_ref()
             .map(|buf| buf.factor)
             .unwrap_or(NonZeroU8::new(1).unwrap())
             != self.msaa_factor
         {
-            self.msaa_buffer = None;
+            self.post_buffer = None;
             self.depth_buffer = None;
         }
     }
@@ -858,7 +884,7 @@ impl Renderer {
     }
 
     fn update_msaa_buffer(&mut self, device: &wgpu::Device) {
-        if self.msaa_buffer.as_ref().map(|buf| buf.factor) != Some(self.msaa_factor) {
+        if self.post_buffer.as_ref().map(|buf| buf.factor) != Some(self.msaa_factor) {
             let (width, height) = self.out_size;
 
             let buffer = device.create_texture(&wgpu::TextureDescriptor {
@@ -875,7 +901,7 @@ impl Renderer {
                 usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
             });
 
-            self.msaa_buffer = Some(MsaaBuffer {
+            self.post_buffer = Some(MsaaBuffer {
                 factor: self.msaa_factor,
                 diffuse_buffer: buffer.create_view(&wgpu::TextureViewDescriptor::default()),
             });
@@ -884,7 +910,7 @@ impl Renderer {
             self.world_pipeline = None;
             self.model_pipeline = None;
 
-            let MsaaBuffer { diffuse_buffer, .. } = self.msaa_buffer.as_ref().unwrap();
+            let MsaaBuffer { diffuse_buffer, .. } = self.post_buffer.as_ref().unwrap();
             self.post_pipeline = Some(pipelines::postprocess::build(
                 device,
                 diffuse_buffer,
@@ -917,10 +943,15 @@ impl Renderer {
             for i in items {
                 if let Some((offset, data)) = i.transfer_data() {
                     // TODO: We can batch this
+                    // ALSO TODO: Maybe this is batched by default already?
                     queue.write_buffer(&model_data, offset, bytemuck::bytes_of(&data));
                 }
             }
         }
+    }
+
+    pub async fn prepare(&mut self) -> Result<(), wgpu::BufferAsyncError> {
+        self.cache.update_buffers().await
     }
 
     pub fn render<'a, F>(
@@ -970,7 +1001,7 @@ impl Renderer {
         };
 
         {
-            let MsaaBuffer { diffuse_buffer, .. } = self.msaa_buffer.as_ref().unwrap();
+            let MsaaBuffer { diffuse_buffer, .. } = self.post_buffer.as_ref().unwrap();
 
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {

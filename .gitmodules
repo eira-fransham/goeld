@@ -1,0 +1,3 @@
+[submodule "winit-async"]
+	path = winit-async
+	url = git@github.com:Vurich/winit-async.git

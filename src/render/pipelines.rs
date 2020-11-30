@@ -466,7 +466,7 @@ pub mod models {
     use lazy_static::lazy_static;
 
     pub use super::Pipeline;
-    use crate::render::{NormalVertex, TexturedVertex};
+    use crate::render::{ModelVertex, TexturedVertex};
     use memoffset::offset_of;
     use std::mem;
 

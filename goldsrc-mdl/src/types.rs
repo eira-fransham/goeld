@@ -1,8 +1,53 @@
 use super::error;
 use arrayvec::ArrayString;
 use bitflags::bitflags;
-use goldsrc_format_common::{parseable, ElementSize, Magic, QVec, SimpleParse};
+use goldsrc_format_common::{parseable, ElementSize, QVec, SimpleParse};
 
+macro_rules! magic {
+    (struct $name:ident($magic:expr);) => {
+        #[derive(PartialEq, Default, Copy, Clone)]
+        pub struct $name;
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                $magic.fmt(f)
+            }
+        }
+
+        impl $name {
+            pub const fn into_inner(self) -> [u8; 4] {
+                $magic
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = [u8; 4];
+
+            fn deref(&self) -> &Self::Target {
+                &$magic
+            }
+        }
+
+        impl ElementSize for $name {
+            const SIZE: usize = <[u8; 4]>::SIZE;
+        }
+
+        impl SimpleParse for $name {
+            fn parse<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+                let val = <[u8; 4]>::parse(r)?;
+
+                if val == $magic {
+                    Ok($name)
+                } else {
+                    Err(error(format!(
+                        "Invalid magic number: expected {:?}, got {:?}",
+                        $magic, val
+                    )))
+                }
+            }
+        }
+    };
+}
 pub const MODEL_NAME_SIZE: usize = 64;
 
 parseable! {
@@ -45,10 +90,14 @@ parseable! {
 
 const MAGIC_NUMBER: [u8; 4] = [b'I', b'D', b'S', b'T'];
 
+magic! {
+    struct MdlMagic(MAGIC_NUMBER);
+}
+
 parseable! {
     #[derive(Debug, Clone)]
     pub struct Header {
-        pub magic: Magic<MAGIC_NUMBER>,
+        pub magic: MdlMagic,
         pub version: u32,
         pub name: ArrayString<[u8; MODEL_NAME_SIZE]>,
         pub filesize: u32,

@@ -158,6 +158,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
     .load(&loader, renderer.cache_mut())
     .unwrap();
 
+    model.set_animation(0);
+
     let mut sc_desc = wgpu::SwapChainDescriptor {
         usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
         format: wgpu::TextureFormat::Bgra8UnormSrgb,
@@ -190,8 +192,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         runner.wait().await;
 
         let now = time::Instant::now();
-
-        renderer.set_time((now - start).as_secs_f32());
 
         let mut elapsed = now - last_update_inst;
 
@@ -373,11 +373,17 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
         let mut redraw_requests = events.redraw_requests().await;
         while let Some(_window_id) = redraw_requests.next().await {
+            // TODO: Doesn't work for multiple windows
+            let elapsed = now - last_render_inst;
             last_render_inst = now;
 
             match swap_chain.get_current_frame() {
                 Ok(frame) => {
                     consecutive_timeouts = 0;
+
+                    model.update(renderer.cache_mut());
+                    model.step(elapsed.as_secs_f64());
+                    renderer.set_time((now - start).as_secs_f32());
 
                     let fut = renderer.prepare();
                     device.poll(wgpu::Maintain::Poll);

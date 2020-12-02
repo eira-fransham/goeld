@@ -143,6 +143,7 @@ impl RenderCache {
                 MINIMUM_ALIGNMENT as u16,
             ),
             bone_matrices: BufferCacheMut::new(
+                // TODO: We need `MAP_WRITE` but it's not possible to also have that be a uniform
                 wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
             ),
         }
@@ -278,6 +279,7 @@ pub enum PipelineDesc {
     Models {
         origin: cgmath::Vector3<f32>,
         data_offset: wgpu::BufferAddress,
+        bone_offset: wgpu::BufferAddress,
     },
 }
 
@@ -403,10 +405,13 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
     0.0, 0.0, 0.5, 1.0,
 );
 
+const BONES_PER_VERTEX: usize = 2;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ModelVertex {
     pub normal: [f32; 3],
-    pub bones: [i8; 2],
+    pub bone_ids: [u32; BONES_PER_VERTEX],
+    pub bone_weights: [f32; BONES_PER_VERTEX],
 }
 
 unsafe impl Pod for ModelVertex {}
@@ -543,13 +548,20 @@ where
 
                     &pipeline.pipeline
                 }
-                PipelineDesc::Models { data_offset, .. } => {
+                PipelineDesc::Models {
+                    data_offset,
+                    bone_offset,
+                    ..
+                } => {
                     let pipeline = self.renderer.model_pipeline.as_ref().unwrap();
 
                     self.rpass.set_bind_group(
                         0,
                         &pipeline.bind_group,
-                        &[u32::try_from(data_offset).unwrap()],
+                        &[
+                            u32::try_from(data_offset).unwrap(),
+                            u32::try_from(bone_offset).unwrap(),
+                        ],
                     );
 
                     &pipeline.pipeline
@@ -878,6 +890,7 @@ impl Renderer {
                 &self.linear_sampler,
                 &self.matrices_buffer,
                 self.cache.model_data.as_ref().unwrap(),
+                self.cache.bone_matrices.as_ref().unwrap(),
                 self.msaa_factor.get() as u32,
             ));
         }
@@ -932,6 +945,8 @@ impl Renderer {
     pub fn set_time(&mut self, time: f32) {
         self.fragment_uniforms
             .update(|uniforms| uniforms.animation_frame = time);
+        // HACK!!
+        self.model_pipeline = None;
     }
 
     pub fn transfer_data<I>(&mut self, queue: &wgpu::Queue, items: I)

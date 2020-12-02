@@ -462,7 +462,7 @@ pub mod sky {
 }
 
 pub mod models {
-    use super::ShaderModuleSourceExt;
+    use super::{BindId, ShaderModuleSourceExt};
     use lazy_static::lazy_static;
 
     pub use super::Pipeline;
@@ -476,6 +476,7 @@ pub mod models {
         static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
             wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/models.frag.spv"));
     }
+
     // TODO: We should use a separate bindgroup for lights, since that way we could just set the bind
     //       group every time we render a model to be a slice of the full light buffer instead of
     //       transferring the lights over every frame. This would make it easier to implement a way of
@@ -493,6 +494,7 @@ pub mod models {
         diffuse_sampler: &wgpu::Sampler,
         matrices: &wgpu::Buffer,
         model_data: &wgpu::Buffer,
+        bones: &wgpu::Buffer,
         sample_count: u32,
     ) -> Pipeline {
         let vs_module = device.create_shader_module(VERTEX_SHADER.as_ref());
@@ -535,6 +537,15 @@ pub mod models {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStage::VERTEX,
+                    ty: wgpu::BindingType::UniformBuffer {
+                        dynamic: true,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -544,6 +555,7 @@ pub mod models {
             push_constant_ranges: &[],
         });
 
+        let mut ids = BindId::default();
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
             layout: Some(&pipeline_layout),
@@ -583,27 +595,50 @@ pub mod models {
             }),
             vertex_state: wgpu::VertexStateDescriptor {
                 index_format: wgpu::IndexFormat::Uint32,
-                vertex_buffers: &[wgpu::VertexBufferDescriptor {
-                    stride: mem::size_of::<TexturedVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::InputStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
-                            offset: offset_of!(TexturedVertex, pos) as u64,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float2,
-                            offset: offset_of!(TexturedVertex, tex_coord) as u64,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
-                            offset: offset_of!(TexturedVertex, atlas_texture) as u64,
-                            shader_location: 2,
-                        },
-                    ],
-                }],
+                vertex_buffers: &[
+                    wgpu::VertexBufferDescriptor {
+                        stride: mem::size_of::<TexturedVertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::InputStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float4,
+                                offset: offset_of!(TexturedVertex, pos) as u64,
+                                shader_location: ids.next(),
+                            },
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float2,
+                                offset: offset_of!(TexturedVertex, tex_coord) as u64,
+                                shader_location: ids.next(),
+                            },
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float4,
+                                offset: offset_of!(TexturedVertex, atlas_texture) as u64,
+                                shader_location: ids.next(),
+                            },
+                        ],
+                    },
+                    wgpu::VertexBufferDescriptor {
+                        stride: mem::size_of::<ModelVertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::InputStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float3,
+                                offset: offset_of!(ModelVertex, normal) as u64,
+                                shader_location: ids.next(),
+                            },
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Uint2,
+                                offset: offset_of!(ModelVertex, bone_ids) as u64,
+                                shader_location: ids.next(),
+                            },
+                            wgpu::VertexAttributeDescriptor {
+                                format: wgpu::VertexFormat::Float2,
+                                offset: offset_of!(ModelVertex, bone_weights) as u64,
+                                shader_location: ids.next(),
+                            },
+                        ],
+                    },
+                ],
             },
             sample_count,
             sample_mask: !0,
@@ -630,6 +665,10 @@ pub mod models {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Buffer(model_data.slice(..)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(bones.slice(..)),
                 },
             ],
         });

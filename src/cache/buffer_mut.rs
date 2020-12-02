@@ -1,16 +1,14 @@
 use crate::cache::{Cache, CacheCommon};
 use std::{
     convert::TryFrom,
-    iter::{self, FromIterator},
-    marker::PhantomData,
-    mem,
+    iter::FromIterator,
     ops::{Deref, Range},
 };
 use wgpu::util::DeviceExt;
 
 pub struct BufferCacheMut<T> {
     values: Vec<T>,
-    is_dirty: bool,
+    dirty_range: Option<Range<u64>>,
     buffer: Option<wgpu::Buffer>,
     buffer_usage: wgpu::BufferUsage,
     buffer_len: usize,
@@ -20,7 +18,7 @@ impl<T> BufferCacheMut<T> {
     pub fn new(buffer_usage: wgpu::BufferUsage) -> Self {
         Self {
             values: Vec::new(),
-            is_dirty: false,
+            dirty_range: None,
             buffer: None,
             buffer_usage: buffer_usage | wgpu::BufferUsage::COPY_SRC,
             buffer_len: 0,
@@ -31,12 +29,15 @@ impl<T> BufferCacheMut<T> {
         self.values.len()
     }
 
-    pub fn as_ref(&self) -> &[T] {
-        self.values.as_ref()
-    }
+    pub fn range_mut(&mut self, range: Range<u64>) -> &mut [T] {
+        let dirty_range = if let Some(cur_range) = &self.dirty_range {
+            cur_range.start.min(range.start)..cur_range.end.max(range.end)
+        } else {
+            range
+        };
 
-    pub fn as_mut(&mut self) -> &mut [T] {
-        self.is_dirty = true;
+        self.dirty_range = Some(dirty_range);
+
         self.values.as_mut()
     }
 
@@ -59,6 +60,14 @@ impl<T> BufferCacheMut<T> {
         }));
         let end = self.len() as u64;
 
+        let dirty_range = if let Some(cur_range) = &self.dirty_range {
+            cur_range.start.min(start)..cur_range.end.max(end)
+        } else {
+            start..end
+        };
+
+        self.dirty_range = Some(dirty_range);
+
         (start..end, out)
     }
 }
@@ -79,26 +88,30 @@ where
     type Key = Range<u64>;
 
     async fn update_buffers(&mut self) -> Result<(), wgpu::BufferAsyncError> {
-        if self.is_dirty && self.buffer_len >= self.values.len() {
-            if let Some(buf) = &mut self.buffer {
-                let slice = buf.slice(0..self.values.len() as u64);
-                slice.map_async(wgpu::MapMode::Write).await?;
-                slice
-                    .get_mapped_range_mut()
-                    .copy_from_slice(bytemuck::cast_slice(&self.values));
-                buf.unmap();
+        return Ok(());
+
+        if let Some(range) = &self.dirty_range {
+            if self.buffer_len >= self.values.len() {
+                if let Some(buf) = &mut self.buffer {
+                    let slice = buf.slice(range.clone());
+                    slice.map_async(wgpu::MapMode::Write).await?;
+                    slice
+                        .get_mapped_range_mut()
+                        .copy_from_slice(bytemuck::cast_slice(
+                            &self.values[range.start as usize..range.end as usize],
+                        ));
+                    buf.unmap();
+
+                    self.dirty_range = None;
+                }
             }
         }
 
         Ok(())
     }
 
-    // TODO: Reuse the same buffer for transferring the data to the GPU, we don't need a new one every time.
-    //       Really, this should be something like a `Vec` where it automatically resizes to a power of two.
-    // Sadly it's not possible to do any buffer reuse because this function can't be async. Even if we made
-    // it an inherent function instead of a trait fn we'd hit problems at the top-level event loop.
     fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
-        if self.is_dirty {
+        if self.dirty_range.is_some() {
             self.buffer = Some(
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,
@@ -107,7 +120,7 @@ where
                 }),
             );
             self.buffer_len = self.values.len();
-            self.values.clear();
+            self.dirty_range = None;
         }
     }
 
@@ -126,6 +139,14 @@ where
         let start = self.values.len() as u64 + self.buffer_len as u64;
         self.values.extend(vals);
         let end = self.values.len() as u64 + self.buffer_len as u64;
+
+        let dirty_range = if let Some(cur_range) = &self.dirty_range {
+            cur_range.start.min(start)..cur_range.end.max(end)
+        } else {
+            start..end
+        };
+
+        self.dirty_range = Some(dirty_range);
 
         if start == end {
             0..0

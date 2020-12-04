@@ -8,7 +8,7 @@ use std::{
     num::{NonZeroI16, NonZeroI32, NonZeroU16, NonZeroU32},
     ops,
 };
-use types::{
+pub use types::{
     BodyPart, Bone, BoneController, BoneFlags, Bounds, Coordinates, DirEntry, DirEntryBones,
     Directories, Header, Hitbox, HitboxFlags, Mesh, Model, MotionFlags, TexInfo, Texture, TriVert,
     MODEL_NAME_SIZE,
@@ -363,7 +363,6 @@ where
 
         let reader = &mut *self.reader;
 
-        // TODO: Remove unwrap
         Ok(TriVertIter::new(reader, count))
     }
 }

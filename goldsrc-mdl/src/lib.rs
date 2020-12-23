@@ -10,7 +10,7 @@ use std::{
 };
 pub use types::{
     BodyPart, Bone, BoneController, BoneFlags, Bounds, Coordinates, DirEntry, DirEntryBones,
-    Directories, Header, Hitbox, HitboxFlags, Mesh, Model, MotionFlags, TexInfo, Texture, TriVert,
+    Directories, Header, Hitbox, HitboxFlags, Mesh, Model, MotionFlags, Texture, TriVert,
     MODEL_NAME_SIZE,
 };
 
@@ -35,7 +35,7 @@ pub struct Mdl<R> {
     pub sequences: Box<[Todo]>,
     pub sequence_groups: Box<[Todo]>,
     pub textures: Box<[Texture]>,
-    pub skins: Box<[Box<[Todo]>]>,
+    pub skins: Box<[Box<[u32]>]>,
     pub bodyparts: Box<[BodyPart]>,
     pub attachments: Box<[Todo]>,
     pub transitions: Box<[Todo]>,
@@ -53,7 +53,7 @@ impl<R> fmt::Debug for Mdl<R> {
             sequences: &'a [Todo],
             sequence_groups: &'a [Todo],
             textures: &'a [Texture],
-            skins: &'a [Box<[Todo]>],
+            skins: &'a [Box<[u32]>],
             bodyparts: &'a [BodyPart],
             attachments: &'a [Todo],
             transitions: &'a [Todo],
@@ -76,10 +76,12 @@ impl<R> fmt::Debug for Mdl<R> {
     }
 }
 
-fn parse_entry<R: io::Read + io::Seek, T: SimpleParse, O: iter::FromIterator<T>>(
-    reader: &mut R,
-    directory: DirEntry,
-) -> io::Result<O> {
+fn parse_entry<R, T, O>(reader: &mut R, directory: DirEntry) -> io::Result<O>
+where
+    R: io::Read + io::Seek,
+    T: SimpleParse,
+    O: iter::FromIterator<T>,
+{
     reader.seek(io::SeekFrom::Start(directory.offset as u64))?;
 
     T::parse_many(reader, directory.count as usize)
@@ -104,11 +106,17 @@ pub struct Meshes<'a, R> {
     offset: Option<u64>,
 }
 
+pub struct Textures<'a, R> {
+    reader: &'a mut R,
+    textures: std::slice::Iter<'a, Texture>,
+}
+
 pub struct Handle<'a, T, R> {
     data: T,
     reader: &'a mut R,
 }
 
+type TextureHandle<'a, R> = Handle<'a, &'a Texture, R>;
 type ModelHandle<'a, R> = Handle<'a, Model, R>;
 type MeshHandle<'a, R> = Handle<'a, Mesh, R>;
 
@@ -117,6 +125,24 @@ impl<'a, T, R> ops::Deref for Handle<'a, T, R> {
 
     fn deref(&self) -> &Self::Target {
         &self.data
+    }
+}
+
+impl<'a, R> Textures<'a, R>
+where
+    R: io::Seek,
+{
+    pub fn next(&mut self) -> io::Result<Option<TextureHandle<'_, R>>> {
+        let cur = if let Some(cur) = self.textures.next() {
+            cur
+        } else {
+            return Ok(None);
+        };
+
+        Ok(Some(Handle {
+            reader: &mut *self.reader,
+            data: cur,
+        }))
     }
 }
 
@@ -206,6 +232,17 @@ where
         Ok(iter::repeat_with(move || SimpleParse::parse(reader)).take(dir_entry.count as usize))
     }
 
+    pub fn vertex_bones(&mut self) -> io::Result<impl Iterator<Item = io::Result<u8>> + '_> {
+        let dir_entry = self.vertices.bones();
+
+        self.reader
+            .seek(io::SeekFrom::Start(dir_entry.offset as u64))?;
+
+        let reader = &mut *self.reader;
+
+        Ok(iter::repeat_with(move || SimpleParse::parse(reader)).take(dir_entry.count as usize))
+    }
+
     pub fn normals(&mut self) -> io::Result<impl Iterator<Item = io::Result<QVec>> + '_> {
         let dir_entry = self.normals.data();
 
@@ -233,6 +270,42 @@ where
     }
 }
 
+impl<'a, R> TextureHandle<'a, R>
+where
+    R: io::Seek + io::Read,
+{
+    pub fn data(&mut self) -> io::Result<image::ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
+        use io::Read as _;
+
+        const PALETTE_SIZE: usize = 256 * 3;
+
+        let num_bytes = self.width * self.height;
+
+        let mut palette = Vec::with_capacity(PALETTE_SIZE);
+        self.reader.seek(io::SeekFrom::Start(
+            self.texture_data_offset as u64 + num_bytes as u64,
+        ))?;
+        self.reader
+            .take(PALETTE_SIZE as u64)
+            .read_to_end(&mut palette)?;
+
+        self.reader
+            .seek(io::SeekFrom::Start(self.texture_data_offset as u64))?;
+
+        let mut out = Vec::with_capacity(num_bytes as usize * 3);
+        for byte in self.reader.take(num_bytes as u64).bytes() {
+            let byte = byte?;
+            let index = byte as usize * 3;
+
+            out.push(palette[index]);
+            out.push(palette[index + 1]);
+            out.push(palette[index + 2]);
+        }
+
+        Ok(image::ImageBuffer::from_raw(self.width, self.height, out)
+            .ok_or_else(|| error(format!("Invalid image for {}", self.name)))?)
+    }
+}
 #[derive(Debug, Copy, Clone)]
 enum VertType {
     Fan { center: TriVert, last: TriVert },
@@ -243,19 +316,23 @@ type TriVertCount = NonZeroU16;
 type TriVertCountAndFlag = i16;
 
 struct TriVertIter<R> {
+    inner: Option<TriVertIterInner<R>>,
+}
+
+struct TriVertIterInner<R> {
     reader: R,
     to_emit: <ArrayVec<[TriVert; 3]> as IntoIterator>::IntoIter,
     state: Option<(TriVertCount, VertType)>,
-    total: Option<NonZeroU32>,
 }
 
 impl<R> TriVertIter<R> {
-    fn new(reader: R, total: u32) -> Self {
-        TriVertIter {
-            reader,
-            to_emit: ArrayVec::default().into_iter(),
-            total: NonZeroU32::new(total),
-            state: None,
+    fn new(reader: R) -> Self {
+        Self {
+            inner: Some(TriVertIterInner {
+                reader,
+                to_emit: ArrayVec::default().into_iter(),
+                state: None,
+            }),
         }
     }
 }
@@ -267,31 +344,27 @@ where
     type Item = io::Result<TriVert>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(to_emit) = self.to_emit.next() {
-            self.state = self.state.and_then(|(cur_count, type_)| {
-                TriVertCount::new(cur_count.get() - 1).map(|c| (c, type_))
-            });
+        let inner = self.inner.as_mut()?;
+
+        if let Some(to_emit) = inner.to_emit.next() {
             return Some(Ok(to_emit));
         }
 
-        // The sequences _are not_ null-terminated, and it appears to be possible for a sequence
-        // to be 0-sized
-        let total = self.total?.get();
-
-        let out = (|| -> io::Result<Option<_>> {
-            let (cur_count, mut type_) = if let Some(state) = self.state {
+        let out = (|| -> Result<Option<_>, Option<io::Error>> {
+            let (cur_count, mut type_) = if let Some(state) = inner.state {
                 state
             } else {
-                match TriVertCountAndFlag::parse(&mut self.reader)? {
+                match TriVertCountAndFlag::parse(&mut inner.reader)? {
+                    0 => return Err(None),
                     count if count.abs() < 3 => {
                         for _ in 0..count.abs() {
-                            TriVert::parse(&mut self.reader)?;
+                            TriVert::parse(&mut inner.reader)?;
                         }
 
                         return Ok(None);
                     }
                     count if count < 0 => {
-                        let (center, last) = SimpleParse::parse(&mut self.reader)?;
+                        let (center, last) = <(_, _)>::parse(&mut inner.reader)?;
 
                         (
                             if let Some(c) = TriVertCount::new(-count as u16 - 2) {
@@ -303,9 +376,9 @@ where
                         )
                     }
                     count => {
-                        let last = SimpleParse::parse(&mut self.reader)?;
+                        let last = <(_, _)>::parse(&mut inner.reader)?;
                         (
-                            if let Some(c) = TriVertCount::new(count as u16 - 1) {
+                            if let Some(c) = TriVertCount::new(count as u16 - 2) {
                                 c
                             } else {
                                 return Ok(None);
@@ -318,30 +391,31 @@ where
 
             match &mut type_ {
                 VertType::Fan { center, last } => {
-                    let cur = SimpleParse::parse(&mut self.reader)?;
-                    self.to_emit = ArrayVec::from([*last, cur, *center]).into_iter();
+                    let cur = SimpleParse::parse(&mut inner.reader)?;
+                    inner.to_emit = ArrayVec::from([*last, cur, *center]).into_iter();
                     *last = cur;
                 }
                 VertType::Strip { last: (a, b) } => {
-                    let cur = SimpleParse::parse(&mut self.reader)?;
-                    self.to_emit = ArrayVec::from([*a, *b, cur]).into_iter();
+                    let cur = SimpleParse::parse(&mut inner.reader)?;
+                    inner.to_emit = ArrayVec::from([*a, *b, cur]).into_iter();
                     *a = *b;
                     *b = cur;
                 }
             }
 
-            self.state = TriVertCount::new(cur_count.get() - 1).map(|c| (c, type_));
+            inner.state = TriVertCount::new(cur_count.get() - 1).map(|c| (c, type_));
 
-            Ok(self.to_emit.next())
+            Ok(inner.to_emit.next())
         })();
-
-        // Every time we set `to_emit`, that's a new triangle. So, here we decrease the triangle count.
-        self.total = NonZeroU32::new(total - 1);
 
         match out {
             Ok(Some(v)) => Some(Ok(v)),
             Ok(None) => self.next(),
-            Err(e) => Some(Err(e)),
+            Err(Some(e)) => Some(Err(e)),
+            Err(None) => {
+                self.inner = None;
+                None
+            }
         }
     }
 }
@@ -356,14 +430,9 @@ where
         self.reader
             .seek(io::SeekFrom::Start(self.triverts.offset as u64))?;
 
-        // The wiki page states that this is the total number of triverts, while if you look at the source
-        // you'll see that it's actually the number of _triangles_. This is important, as you will definitely
-        // get the wrong information if you mix the two up.
-        let count = self.triverts.count;
-
         let reader = &mut *self.reader;
 
-        Ok(TriVertIter::new(reader, count))
+        Ok(TriVertIter::new(reader))
     }
 }
 
@@ -391,7 +460,24 @@ where
         let bones = parse_entry(&mut reader, directories.bones)?;
         let bone_controllers = parse_entry(&mut reader, directories.bone_controllers)?;
         let hitboxes = parse_entry(&mut reader, directories.hitboxes)?;
+
         let textures = parse_entry(&mut reader, directories.textures)?;
+        let mut skins: Vec<Box<[u32]>> = Vec::with_capacity(directories.skin_family_count as usize);
+
+        for skin in 0..directories.skin_family_count {
+            use goldsrc_format_common::ElementSize;
+
+            skins.push(parse_entry(
+                &mut reader,
+                DirEntry {
+                    count: directories.skin_ref_count,
+                    offset: directories.skin_offset + skin * <u32 as ElementSize>::SIZE as u32,
+                },
+            )?);
+        }
+
+        let skins = skins.into_boxed_slice();
+
         let bodyparts = parse_entry(&mut reader, directories.bodyparts)?;
 
         Ok(Mdl {
@@ -401,7 +487,7 @@ where
             hitboxes,
             textures,
             bodyparts,
-            skins: Box::new([]),
+            skins,
             sequences: Box::new([]),
             sequence_groups: Box::new([]),
             attachments: Box::new([]),
@@ -414,6 +500,13 @@ where
         BodyParts {
             reader: &mut self.reader,
             bodyparts: self.bodyparts.iter(),
+        }
+    }
+
+    pub fn textures(&mut self) -> Textures<'_, R> {
+        Textures {
+            reader: &mut self.reader,
+            textures: self.textures.iter(),
         }
     }
 }

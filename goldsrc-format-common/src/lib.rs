@@ -366,6 +366,12 @@ impl<C: Default> From<[f32; 3]> for V3<C> {
     }
 }
 
+impl<C> From<V3<C>> for [f32; 3] {
+    fn from(vec: V3<C>) -> Self {
+        vec.0
+    }
+}
+
 pub type QVec = V3<XEastYSouthZUp>;
 
 #[macro_export]

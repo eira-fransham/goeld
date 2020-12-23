@@ -83,6 +83,8 @@ pub struct ModelData {
 unsafe impl Pod for ModelData {}
 unsafe impl Zeroable for ModelData {}
 
+type BoneMatrix = [[f32; 4]; 4];
+
 pub struct RenderCache {
     pub diffuse: Atlas,
     pub lightmap: Atlas,
@@ -94,7 +96,7 @@ pub struct RenderCache {
     pub indices: BufferCache<u32>,
 
     pub model_data: AlignedBufferCache<ModelData>,
-    pub bone_matrices: BufferCacheMut<[[f32; 4]; 4]>,
+    pub bone_matrices: BufferCacheMut<BoneMatrix>,
 }
 
 impl RenderCache {
@@ -405,13 +407,12 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
     0.0, 0.0, 0.5, 1.0,
 );
 
-const BONES_PER_VERTEX: usize = 2;
+const BONES_PER_VERTEX: usize = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelVertex {
     pub normal: [f32; 3],
-    pub bone_ids: [u32; BONES_PER_VERTEX],
-    pub bone_weights: [f32; BONES_PER_VERTEX],
+    pub bone_id: u32,
 }
 
 unsafe impl Pod for ModelVertex {}
@@ -419,7 +420,7 @@ unsafe impl Zeroable for ModelVertex {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TexturedVertex {
-    pub pos: [f32; 4],
+    pub pos: [f32; 3],
     /// For world vertices, this starts at zero and must be added to `WorldVertex::atlas_texture.xy`,
     /// for vertices of textures which don't have wrapping implemented in a shader (models and
     /// skyboxes) this is the absolute coord. We might change this to be consistent in the future,
@@ -560,7 +561,8 @@ where
                         &pipeline.bind_group,
                         &[
                             u32::try_from(data_offset).unwrap(),
-                            u32::try_from(bone_offset).unwrap(),
+                            u32::try_from(bone_offset).unwrap()
+                                * mem::size_of::<BoneMatrix>() as u32,
                         ],
                     );
 
@@ -731,32 +733,32 @@ impl Renderer {
             label: None,
             contents: bytemuck::cast_slice(&[
                 TexturedVertex {
-                    pos: [-1., -1., 0., 1.],
+                    pos: [-1., -1., 0.],
                     tex_coord: [0., 1.],
                     atlas_texture,
                 },
                 TexturedVertex {
-                    pos: [1., -1., 0., 1.],
+                    pos: [1., -1., 0.],
                     tex_coord: [1., 1.],
                     atlas_texture,
                 },
                 TexturedVertex {
-                    pos: [1., 1., 0., 1.],
+                    pos: [1., 1., 0.],
                     tex_coord: [1., 0.],
                     atlas_texture,
                 },
                 TexturedVertex {
-                    pos: [1., 1., 0., 1.],
+                    pos: [1., 1., 0.],
                     tex_coord: [1., 0.],
                     atlas_texture,
                 },
                 TexturedVertex {
-                    pos: [-1., 1., 0., 1.],
+                    pos: [-1., 1., 0.],
                     tex_coord: [0., 0.],
                     atlas_texture,
                 },
                 TexturedVertex {
-                    pos: [-1., -1., 0., 1.],
+                    pos: [-1., -1., 0.],
                     tex_coord: [0., 1.],
                     atlas_texture,
                 },

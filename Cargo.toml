@@ -1,5 +1,5 @@
 [package]
-name = "unforseen-consequences-rust"
+name = "goeld"
 version = "0.1.0"
 authors = ["Jef <jackefransham@gmail.com>"]
 edition = "2018"
@@ -23,8 +23,8 @@ rect_packer = "0.2"
 image = "0.23"
 memoffset = "0.5"
 anyhow = "1"
-open-asset-importer = { path = "../assimp-rs/" }
 jemallocator = { version = "0.3", optional = true }
+goldsrc-mdl = { path = "./goldsrc-mdl/" }
 
 [build-dependencies]
 shaderc = "0.6"

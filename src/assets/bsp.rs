@@ -6,7 +6,7 @@ use crate::{
         World as RenderWorld, WorldVertex,
     },
 };
-use cgmath::{InnerSpace, Point3};
+use cgmath::Point3;
 use collision::{Aabb3, Frustum, Relation};
 use fnv::FnvHashMap as HashMap;
 use std::{convert::TryFrom, ops::Range};
@@ -41,13 +41,11 @@ fn cluster_meshes<'a, F>(
     Vec<TexturedVertex>,
     Vec<WorldVertex>,
     impl ExactSizeIterator<
-            Item = (
-                &'a bsp::Q2Model,
-                impl Iterator<Item = (&'a bsp::Q2Leaf, impl Iterator<Item = u32> + Clone + 'a)>
-                    + Clone
-                    + 'a,
-            ),
-        > + Clone
+        Item = (
+            &'a bsp::Q2Model,
+            impl Iterator<Item = (&'a bsp::Q2Leaf, impl Iterator<Item = u32> + Clone + 'a)> + Clone + 'a,
+        ),
+    > + Clone
         + 'a,
 )
 where
@@ -103,7 +101,7 @@ where
 
             (
                 TexturedVertex {
-                    pos: [vert.x(), vert.y(), vert.z(), 1.],
+                    pos: [vert.x(), vert.y(), vert.z()],
                     tex_coord: [u, v],
                     atlas_texture: [
                         tex_rect.x as u32,

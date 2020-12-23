@@ -1,6 +1,6 @@
 #pragma optimize(on)
 
-layout(location = 0) in vec4 a_Pos;
+layout(location = 0) in vec3 a_Pos;
 layout(location = 1) in vec2 a_TexCoord;
 layout(location = 2) in uvec4 a_Tex;
 
@@ -19,7 +19,7 @@ void transformTexturedVertex(mat4 view, mat4 proj, vec4 pos) {
 }
 
 void transformTexturedVertex(mat4 view, mat4 proj) {
-    transformTexturedVertex(view, proj, a_Pos);
+    transformTexturedVertex(view, proj, vec4(a_Pos, 1.0));
 }
 
 void texCoords(

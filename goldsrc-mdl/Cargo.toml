@@ -8,7 +8,9 @@ edition = "2018"
 
 [dependencies]
 arrayvec = "0.5"
+cgmath = "0.17"
 goldsrc-format-common = { path = "../goldsrc-format-common/", features = ["nightly"] }
 bitflags = "1"
 itertools = "0.9"
+image = "0.23"
 positioned-io = "0.2"

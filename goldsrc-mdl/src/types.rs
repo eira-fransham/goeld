@@ -168,21 +168,10 @@ parseable! {
 parseable! {
     #[derive(Debug, Clone, Copy)]
     pub struct TriVert {
-        pub position: u16,
-        pub normal: u16,
+        pub position_index: u16,
+        pub normal_index: u16,
         pub u: u16,
         pub v: u16,
-    }
-}
-
-parseable! {
-    #[derive(Debug, Clone)]
-    pub struct TexInfo {
-        pub name: ArrayString<[u8; MODEL_NAME_SIZE]>,
-        pub flags: u32,
-        pub width: u32,
-        pub height: u32,
-        pub texture_data_offset: u32,
     }
 }
 
@@ -194,6 +183,20 @@ pub struct Coordinates<T> {
     pub roll: T,
     pub pitch: T,
     pub yaw: T,
+}
+
+impl<T> From<Coordinates<T>> for cgmath::Matrix4<T>
+where
+    T: cgmath::BaseFloat,
+{
+    fn from(other: Coordinates<T>) -> Self {
+        use cgmath::{Deg, Matrix4, Vector3};
+
+        Matrix4::from_translation(Vector3::new(other.x, other.y, other.z))
+            * Matrix4::from_angle_z(Deg(other.roll))
+            * Matrix4::from_angle_y(Deg(other.pitch))
+            * Matrix4::from_angle_x(Deg(other.yaw))
+    }
 }
 
 impl<T> ElementSize for Coordinates<T>
@@ -224,10 +227,35 @@ parseable! {
     #[derive(Debug, Clone)]
     pub struct Texture {
         pub name: ArrayString<[u8; MODEL_NAME_SIZE]>,
-        pub flags: u32,
+        pub flags: TextureFlags,
         pub width: u32,
         pub height: u32,
         pub texture_data_offset: u32,
+    }
+}
+
+bitflags! {
+    #[derive(Default)]
+    pub struct TextureFlags: u32 {
+        const FLATSHADE  = 0b0000_0000_0000_0000_0001;
+        const CHROME     = 0b0000_0000_0000_0000_0010;
+        const FULLBRIGHT = 0b0000_0000_0000_0000_0100;
+        const NOMIPS     = 0b0000_0000_0000_0000_1000;
+        const ALPHA      = 0b0000_0000_0000_0001_0000;
+        const ADDITIVE   = 0b0000_0000_0000_0010_0000;
+        const MASKED     = 0b0000_0000_0000_0100_0000;
+    }
+}
+
+impl ElementSize for TextureFlags {
+    const SIZE: usize = u32::SIZE;
+}
+
+impl SimpleParse for TextureFlags {
+    fn parse<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        u32::parse(r).and_then(|v| {
+            Self::from_bits(v).ok_or_else(|| error(format!("Invalid texture flags: {:b}", v)))
+        })
     }
 }
 

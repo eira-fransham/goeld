@@ -1,5 +1,4 @@
 #![feature(osstring_ascii, const_generics, type_alias_impl_trait, async_closure)]
-extern crate open_asset_importer as assimp;
 
 use bsp::Bsp;
 
@@ -65,7 +64,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device, size.into(), 1.6, 2.0);
+    let mut renderer = Renderer::init(&device, size.into(), 1.6, 1.0);
     let mut sky = None;
     let mut camera = None;
 
@@ -134,27 +133,18 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         None
     };
 
-    let mut model_importer = assimp::Importer::new();
-
-    model_importer.join_identical_vertices(true);
-    model_importer.optimize_meshes(true);
-    model_importer.optimize_graph(|opt| {
-        opt.enable = true;
-    });
-    model_importer.debone(|opt| {
-        opt.enable = true;
-    });
-    model_importer.triangulate(true);
-
     let mut camera = camera.unwrap_or(Camera::new(cgmath::Deg(70.), size.width, size.height));
 
     let mut bsp = BspAsset(bsp).load(&loader, renderer.cache_mut()).unwrap();
 
-    let mut model = MdlAsset(
-        model_importer
-            .read_file("data/models/bullsquid.mdl")
+    let mut model = MdlAsset {
+        main: goldsrc_mdl::Mdl::read(std::fs::File::open("data/models/bullsquid.mdl").unwrap())
             .unwrap(),
-    )
+        textures: Some(
+            goldsrc_mdl::Mdl::read(std::fs::File::open("data/models/bullsquidT.mdl").unwrap())
+                .unwrap(),
+        ),
+    }
     .load(&loader, renderer.cache_mut())
     .unwrap();
 

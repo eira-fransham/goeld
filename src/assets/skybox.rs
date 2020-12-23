@@ -82,7 +82,7 @@ impl LoadAsset for &'_ SkyboxAsset<'_> {
             let tex_h = rect.height as f32;
 
             TexturedVertex {
-                pos: [pos[0], pos[1], pos[2], 0.5],
+                pos: [pos[0], pos[1], pos[2]],
                 tex_coord: [
                     // We do `(x + 1) / 2` to convert from `-1..1` to `0..1`
                     rect.x as f32 + (((coord[0] + 1.) / 2.) * tex_w).round(),

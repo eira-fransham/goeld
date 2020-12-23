@@ -148,9 +148,7 @@ where
 
                 encoder.copy_buffer_to_buffer(buffer, 0, &new_buffer, 0, start_of_free);
 
-                self.buffer_len += self.unwritten.len() as u64;
                 self.buffer = Some(new_buffer);
-                self.unwritten.clear();
             } else {
                 self.buffer = Some(
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -159,9 +157,10 @@ where
                         usage: self.buffer_usage,
                     }),
                 );
-                self.buffer_len = self.unwritten.len() as u64;
-                self.unwritten.clear();
             }
+
+            self.buffer_len += self.unwritten.len() as u64;
+            self.unwritten.clear();
         }
     }
 

@@ -190,7 +190,7 @@ pub mod world {
                             step_mode: wgpu::InputStepMode::Vertex,
                             attributes: &[
                                 wgpu::VertexAttributeDescriptor {
-                                    format: wgpu::VertexFormat::Float4,
+                                    format: wgpu::VertexFormat::Float3,
                                     offset: offset_of!(TexturedVertex, pos) as u64,
                                     shader_location: ids.next(),
                                 },
@@ -413,7 +413,7 @@ pub mod sky {
                     step_mode: wgpu::InputStepMode::Vertex,
                     attributes: &[
                         wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
+                            format: wgpu::VertexFormat::Float3,
                             offset: offset_of!(TexturedVertex, pos) as u64,
                             shader_location: 0,
                         },
@@ -601,7 +601,7 @@ pub mod models {
                         step_mode: wgpu::InputStepMode::Vertex,
                         attributes: &[
                             wgpu::VertexAttributeDescriptor {
-                                format: wgpu::VertexFormat::Float4,
+                                format: wgpu::VertexFormat::Float3,
                                 offset: offset_of!(TexturedVertex, pos) as u64,
                                 shader_location: ids.next(),
                             },
@@ -627,13 +627,8 @@ pub mod models {
                                 shader_location: ids.next(),
                             },
                             wgpu::VertexAttributeDescriptor {
-                                format: wgpu::VertexFormat::Uint2,
-                                offset: offset_of!(ModelVertex, bone_ids) as u64,
-                                shader_location: ids.next(),
-                            },
-                            wgpu::VertexAttributeDescriptor {
-                                format: wgpu::VertexFormat::Float2,
-                                offset: offset_of!(ModelVertex, bone_weights) as u64,
+                                format: wgpu::VertexFormat::Uint,
+                                offset: offset_of!(ModelVertex, bone_id) as u64,
                                 shader_location: ids.next(),
                             },
                         ],
@@ -792,7 +787,7 @@ pub mod postprocess {
                     step_mode: wgpu::InputStepMode::Vertex,
                     attributes: &[
                         wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float4,
+                            format: wgpu::VertexFormat::Float3,
                             offset: offset_of!(TexturedVertex, pos) as u64,
                             shader_location: 0,
                         },

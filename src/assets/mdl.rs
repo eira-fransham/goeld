@@ -8,18 +8,19 @@ use crate::{
 };
 use cgmath::Transform;
 use fnv::FnvHashMap as HashMap;
+use goldsrc_mdl as mdl;
 use image::ImageBuffer;
 use std::{
     borrow::Cow,
     collections::hash_map::Entry,
-    mem,
+    io, mem,
     ops::{Add, Mul, Range},
 };
 
-// TODO: Is this the root for all file types or just HL1 .mdl files?
-const ROOT_NAME: &str = "<MDL_root>";
-
-pub struct MdlAsset<'a>(pub assimp::Scene<'a>);
+pub struct MdlAsset<R> {
+    pub main: mdl::Mdl<R>,
+    pub textures: Option<mdl::Mdl<R>>,
+}
 
 // TODO: Stop using String
 #[derive(Debug, Clone, PartialEq)]
@@ -128,10 +129,10 @@ struct CurrentAnimation {
     index: u32,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Model {
     vert_offset: u64,
-    norm_offset: u64,
+    model_vert_offset: u64,
     index_ranges: Vec<Range<u32>>,
     model_data_offset: u64,
 
@@ -164,67 +165,7 @@ impl Model {
         });
     }
 
-    pub fn update(&mut self, cache: &mut RenderCache) {
-        use cgmath::SquareMatrix as _;
-
-        if self.transferred_data == self.current_animation {
-            return;
-        }
-
-        let bones = cache.bone_matrices.range_mut(self.bone_range.clone());
-
-        let node = if let Some(node) = self.nodes.get(ROOT_NAME) {
-            node
-        } else {
-            return;
-        };
-
-        let transform = node.default_transform;
-
-        let anim =
-            self.current_animation
-                .as_ref()
-                .and_then(|CurrentAnimation { index, timestamp }| {
-                    self.animations
-                        .get(*index as usize)
-                        .map(|anim| (*timestamp, anim))
-                });
-        let keyframe = anim.and_then(|(timestamp, anim)| anim.keyframe_at(ROOT_NAME, timestamp));
-
-        fn update_node(
-            bones: &mut [[[f32; 4]; 4]],
-            nodes: &HashMap<String, Node>,
-            animation: Option<(f64, &Animation)>,
-            parent_transform: cgmath::Matrix4<f32>,
-            cur_node: &Node,
-            keyframe: Option<cgmath::Matrix4<f32>>,
-        ) {
-            let keyframe_transform = keyframe.clone().unwrap_or(cur_node.default_transform);
-
-            let transform = parent_transform * keyframe_transform;
-
-            if let Some(bone_id) = &cur_node.bone {
-                bones[*bone_id as usize] =
-                    (cur_node.default_transform * transform * cur_node.bone_offset).into();
-            }
-
-            for child in &cur_node.children {
-                let node = if let Some(node) = nodes.get(child) {
-                    node
-                } else {
-                    continue;
-                };
-
-                let keyframe = animation
-                    .as_ref()
-                    .and_then(|(timestamp, anim)| anim.keyframe_at(child, *timestamp));
-
-                update_node(bones, nodes, animation, transform, node, keyframe);
-            }
-        }
-
-        update_node(bones, &self.nodes, anim, transform, node, keyframe);
-    }
+    pub fn update(&mut self, cache: &mut RenderCache) {}
 }
 
 // We don't support scaling, and the order is always: rotate around bone origin, translate
@@ -235,247 +176,137 @@ pub struct Bone {
     pub rotation: [f32; 4],
 }
 
-impl LoadAsset for MdlAsset<'_> {
+impl<R> LoadAsset for MdlAsset<R>
+where
+    R: io::Read + io::Seek,
+{
     type Asset = Model;
 
     #[inline]
-    fn load(self, loader: &Loader, cache: &mut RenderCache) -> anyhow::Result<Self::Asset> {
+    fn load(mut self, loader: &Loader, cache: &mut RenderCache) -> anyhow::Result<Self::Asset> {
         use crate::loader::Load;
         use cgmath::SquareMatrix as _;
+        use std::convert::TryFrom;
 
-        let mut textures_by_name =
-            HashMap::with_capacity_and_hasher(self.0.num_textures() as usize, Default::default());
+        let mut textures = Vec::with_capacity(
+            self.main.textures.len()
+                + self
+                    .textures
+                    .as_ref()
+                    .map(|t| t.textures.len())
+                    .unwrap_or(0),
+        );
 
-        for texture in self.0.textures() {
-            if let Some(data) = texture.data() {
-                // Assimp lies about the texture format for HL1 models, and it also incorrectly tags
-                // some as needing to be inverted when this isn't true. I don't know why.
-                let tex = match texture.format_hint() {
-                    Some("rgba8888") | Some("bgra8888") | None => cache.diffuse.append(
-                        ImageBuffer::<image::Bgra<u8>, _>::from_raw(
-                            texture.width(),
-                            texture.height(),
-                            data.bytes(),
-                        )
-                        .unwrap(),
-                    ),
-                    _ => unimplemented!(),
-                };
+        let mut texture_iter = self.main.textures();
+        while let Some(mut tex) = texture_iter.next()? {
+            textures.push(cache.diffuse.append(tex.data()?));
+        }
 
-                textures_by_name.insert(Cow::Borrowed(texture.filename()), tex);
+        if let Some(mut tex) = self.textures {
+            let mut texture_iter = tex.textures();
+            while let Some(mut tex) = texture_iter.next()? {
+                textures.push(cache.diffuse.append(tex.data()?));
             }
         }
 
-        const ASSUME_SIMPLE_TEXTURES: bool = true;
-
-        let loader = loader.textures();
-
-        let materials = self
-            .0
-            .materials()
-            .map(|mat| {
-                let mut tex = mat.diffuse().unwrap();
-
-                if let Some(first) = tex.textures.next() {
-                    if ASSUME_SIMPLE_TEXTURES || tex.textures.len() == 0 {
-                        if ASSUME_SIMPLE_TEXTURES || first.blend_op == assimp::BlendOp::Replace {
-                            match textures_by_name.entry(first.path.to_string().into()) {
-                                Entry::Occupied(entry) => (first.channel, entry.get().clone()),
-                                Entry::Vacant(entry) => {
-                                    use std::path::Path;
-
-                                    let (file, path) = loader
-                                        .load(Path::new(&first.path[..]).into())
-                                        .unwrap_or_else(|e| {
-                                            panic!("Could not find {:?}: {:?}", &first.path, e)
-                                        });
-
-                                    let img = image::load(
-                                        std::io::BufReader::new(file),
-                                        image::ImageFormat::from_path(&path).unwrap(),
-                                    )
-                                    .unwrap();
-
-                                    let appended = cache.diffuse.append(img);
-
-                                    let out = entry.insert(appended).clone();
-
-                                    (first.channel, out)
-                                }
-                            }
-                        } else {
-                            unimplemented!()
-                        }
-                    } else {
-                        unimplemented!(
-                            "{:?}",
-                            std::iter::once(first)
-                                .chain(tex.textures)
-                                .collect::<Vec<_>>()
-                        )
-                    }
-                } else {
-                    unimplemented!()
-                }
-            })
-            .collect::<Vec<_>>();
-
-        fn push_nodes(
-            ranges: &mut Vec<Range<u32>>,
-            bones: &mut Vec<cgmath::Matrix4<f32>>,
-            nodes: &mut HashMap<String, Node>,
-            offset: u64,
-            materials: &[(u32, rect_packer::Rect)],
-            cache: &mut RenderCache,
-            scene: &assimp::Scene,
-
-            original_transform: cgmath::Matrix4<f32>,
-            node: &assimp::Node,
-        ) {
-            use std::convert::TryFrom;
-
-            let cur_transform = cgmath::Matrix4::<f32>::from(node.transform());
-            let transform = cur_transform * original_transform;
-
-            let mut node_metadata = Node {
-                default_transform: cur_transform,
-                bone_offset: cgmath::SquareMatrix::identity(),
-                children: Vec::with_capacity(node.num_children() as usize),
-                bone: None,
-            };
-
-            dbg!(node.name());
-
-            for id in node.meshes() {
-                let mesh = scene.mesh(*id).unwrap();
-
-                dbg!(mesh.name());
-
-                let mut vertex_bones = vec![[None, None]; mesh.num_vertices() as usize];
-
-                for bone in mesh.bones() {
-                    let node = if let Some(node) = nodes.get_mut(bone.name()) {
-                        node
-                    } else {
-                        continue;
-                    };
-
-                    if node.bone.is_none() {
-                        let bone_id = bones.len() as u32;
-                        bones.push(transform);
-
-                        node.bone = Some(bone_id);
-                        node.bone_offset = bone.offset_matrix().into();
-                    }
-
-                    let bone_id = node.bone.unwrap();
-
-                    for v_weight in bone.weights() {
-                        let id = v_weight.mVertexId;
-                        let weight = v_weight.mWeight;
-
-                        let v_weight = &mut vertex_bones[id as usize];
-
-                        match v_weight {
-                            [Some(_), other @ None] | [other @ None, None] => {
-                                *other = Some((
-                                    u32::try_from(bone_id).expect("Too many bones in model"),
-                                    weight,
-                                ))
-                            }
-                            _ => panic!(),
-                        }
-                    }
-                }
-
-                let (channel, tex_rect) = materials[mesh.material_id() as usize];
-
-                let vert_range = cache.textured_vertices.append(
-                    mesh.positions().zip(mesh.texture_coords(channel)).map(
-                        move |(position, uvs)| {
-                            let position: cgmath::Vector3<f32> = position.into();
-                            let position =
-                                cgmath::Vector4::from([position.x, position.y, position.z, 1.]);
-
-                            TexturedVertex {
-                                pos: position.into(),
-                                tex_coord: [
-                                    uvs.x * (tex_rect.width as f32),
-                                    uvs.y * (tex_rect.height as f32),
-                                ],
-                                atlas_texture: [
-                                    tex_rect.x as u32,
-                                    tex_rect.y as u32,
-                                    tex_rect.width as u32,
-                                    tex_rect.height as u32,
-                                ],
-                            }
-                        },
-                    ),
-                );
-
-                let normals = mesh.normals();
-
-                assert!(normals.len() > 0);
-
-                cache.model_vertices.append(normals.zip(&vertex_bones).map(
-                    move |(norm, [bone_a, bone_b])| {
-                        let norm: cgmath::Vector3<f32> = norm.into();
-                        let norm = transform.transform_vector(norm);
-                        let bones = [bone_a.unwrap_or_default(), bone_b.unwrap_or_default()];
-                        ModelVertex {
-                            normal: norm.into(),
-                            bone_ids: [bones[0].0, bones[1].0],
-                            bone_weights: [bones[0].1, bones[1].1],
-                        }
-                    },
-                ));
-
-                let to_add = (vert_range.start as u64 - offset) as u32;
-
-                let index_range = cache.indices.append(
-                    mesh.faces()
-                        .flat_map(|face| {
-                            assert_eq!(face.primitive_type(), assimp::PrimitiveType::Triangle);
-                            face.indices().iter().copied()
-                        })
-                        .map(|i| i + to_add),
-                );
-
-                ranges.push(index_range.start as u32..index_range.end as u32);
-            }
-
-            for node in node.children() {
-                push_nodes(
-                    ranges, bones, nodes, offset, materials, cache, scene, transform, node,
-                );
-
-                node_metadata.children.push(node.name().to_string());
-            }
-
-            nodes.insert(node.name().to_string(), node_metadata);
-        }
+        let mut bodyparts = self.main.bodyparts();
 
         let vert_offset = cache.textured_vertices.len();
-        let norm_offset = cache.model_vertices.len();
+        let mut vertices = Vec::new();
+        let mut model_vertices = Vec::new();
+        let mut indices = Vec::new();
 
-        let mut index_ranges = Vec::new();
-        let mut bones = Vec::new();
-        let mut nodes = HashMap::default();
+        while let Some((_name, mut models)) = bodyparts.next()? {
+            let mut model = if let Some(main_model) = models.next()? {
+                main_model
+            } else {
+                continue;
+            };
 
-        if let Some(node) = self.0.root_node() {
-            push_nodes(
-                &mut index_ranges,
-                &mut bones,
-                &mut nodes,
-                vert_offset,
-                &materials,
-                cache,
-                &self.0,
-                node.transform().into(),
-                node,
-            );
+            let start = vertices.len();
+            vertices.extend(model.vertices()?.map(|qv| TexturedVertex {
+                pos: qv.unwrap().into(),
+                tex_coord: [0.; 2],
+                // TODO: Textures
+                atlas_texture: [0; 4],
+            }));
+            let end = vertices.len();
+
+            model_vertices.extend(model.vertex_bones()?.map(|bone| ModelVertex {
+                normal: Default::default(),
+                bone_id: bone.unwrap() as _,
+            }));
+
+            let mut meshes = model.meshes()?;
+            while let Some(mut mesh) = meshes.next()? {
+                let texture = textures.get(mesh.skin_ref as usize).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Texture ref out of range: {} >= {}",
+                            mesh.skin_ref,
+                            textures.len()
+                        ),
+                    )
+                })?;
+
+                for trivert in mesh.triverts()? {
+                    let trivert = trivert?;
+
+                    let cur_index = u32::try_from(vertices.len())?;
+
+                    let vert = vertices[start..end]
+                        .get_mut(trivert.position_index as usize)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "Vertex out of range: {} >= {}",
+                                    trivert.position_index as usize, cur_index
+                                ),
+                            )
+                        })?;
+                    let trivert_uv = [trivert.u as f32, trivert.v as f32];
+                    let trivert_atlas = [
+                        texture.x as u32,
+                        texture.y as u32,
+                        texture.width as u32,
+                        texture.height as u32,
+                    ];
+
+                    let index = if (vert.tex_coord, vert.atlas_texture) == Default::default()
+                        || (vert.tex_coord, vert.atlas_texture) == (trivert_uv, trivert_atlas)
+                    {
+                        vert.tex_coord = trivert_uv;
+                        vert.atlas_texture = trivert_atlas;
+
+                        u32::try_from(start)? + trivert.position_index as u32
+                    } else {
+                        let vert = TexturedVertex {
+                            tex_coord: trivert_uv,
+                            atlas_texture: trivert_atlas,
+                            ..vert.clone()
+                        };
+
+                        vertices.push(vert);
+                        model_vertices.push(model_vertices[trivert.position_index as usize]);
+
+                        cur_index
+                    };
+
+                    indices.push(index);
+                }
+            }
         }
+
+        debug_assert_eq!(model_vertices.len(), vertices.len());
+
+        let vert_offset = cache.textured_vertices.append(vertices).start;
+        let model_vert_offset = cache.model_vertices.append(model_vertices).start;
+        let index_range = cache.indices.append(indices);
+        let index_ranges = vec![index_range.start as u32..index_range.end as u32];
+
+        let mut nodes = HashMap::default();
 
         let model_data_offset = cache
             .model_data
@@ -485,74 +316,28 @@ impl LoadAsset for MdlAsset<'_> {
             }))
             .start;
 
-        let bone_range = cache
-            .bone_matrices
-            .append(bones.into_iter().map(Into::into));
+        let bones = &self.main.bones;
+        let bone_range = cache.bone_matrices.append(bones.iter().map(|mut bone| {
+            use std::convert::TryFrom;
 
-        let animations = self
-            .0
-            .animations()
-            .map(|anim| Animation {
-                fps: anim.fps(),
-                duration: anim.duration(),
+            let mut out = cgmath::Matrix4::from(bone.value.clone());
 
-                keyframes_per_node: anim
-                    .node_anims()
-                    .map(|node_anim| {
-                        // TODO: Split transform/rotate/scale keys like assimp does
-                        //       so we don't need to jankily translate it back to
-                        //       a monolithic keyframe.
-                        (
-                            node_anim.node_name().to_string(),
-                            Keyframes {
-                                translation: node_anim
-                                    .position_keys()
-                                    .map(|key| Keyframe {
-                                        time: key.time(),
-                                        value: cgmath::Vector3::<f32>::from(key.value()),
-                                    })
-                                    .filter(|Keyframe { value, .. }| {
-                                        !value.x.is_nan() && !value.y.is_nan() && !value.z.is_nan()
-                                    })
-                                    .collect(),
-                                rotation: node_anim
-                                    .rotation_keys()
-                                    .map(|key| Keyframe {
-                                        time: key.time(),
-                                        value: cgmath::Quaternion::<f32>::from(key.value()),
-                                    })
-                                    .filter(|Keyframe { value, .. }| {
-                                        !value.v.x.is_nan()
-                                            && !value.v.y.is_nan()
-                                            && !value.v.z.is_nan()
-                                            && !value.s.is_nan()
-                                    })
-                                    .collect(),
-                                scaling: node_anim
-                                    .scaling_keys()
-                                    .map(|key| Keyframe {
-                                        time: key.time(),
-                                        value: cgmath::Vector3::<f32>::from(key.value()),
-                                    })
-                                    .filter(|Keyframe { value, .. }| {
-                                        !value.x.is_nan() && !value.y.is_nan() && !value.z.is_nan()
-                                    })
-                                    .collect(),
-                            },
-                        )
-                    })
-                    .collect(),
-            })
-            .collect();
+            while let Some(parent) = usize::try_from(bone.parent).ok().and_then(|p| bones.get(p)) {
+                bone = parent;
+                out = cgmath::Matrix4::from(bone.value.clone()) * out;
+            }
+
+            out.into()
+        }));
 
         Ok(Model {
             vert_offset,
-            norm_offset,
+            model_vert_offset,
             index_ranges,
             model_data_offset,
 
             // TODO
-            animations,
+            animations: Default::default(),
             current_animation: None,
             transferred_data: None,
             bone_range,
@@ -589,12 +374,12 @@ impl<'a> Render for &'a Model {
         _ctx: &T,
     ) -> RenderMesh<Self::Offsets, Self::Indices> {
         RenderMesh {
-            offsets: (self.vert_offset.into(), self.norm_offset.into()),
+            offsets: (self.vert_offset.into(), self.model_vert_offset.into()),
             indices: self.index_ranges.iter().cloned(),
             pipeline: PipelineDesc::Models {
                 origin: self.position,
                 data_offset: self.model_data_offset,
-                bone_offset: self.bone_range.start * mem::size_of::<[[f32; 4]; 4]>() as u64,
+                bone_offset: self.bone_range.start,
             },
         }
     }

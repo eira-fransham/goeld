@@ -47,6 +47,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arraydeque"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0ffd3d69bd89910509a5d31d1f1353f38ccffdd116dd0099bbd6627f7bd8ad8"
+
+[[package]]
 name = "arrayvec"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -840,6 +846,7 @@ name = "goeld"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arraydeque",
  "async-trait",
  "bsp",
  "bytemuck",
@@ -849,6 +856,9 @@ dependencies = [
  "futures",
  "goldsrc-mdl",
  "image",
+ "imgui",
+ "imgui-wgpu",
+ "imgui-winit-support",
  "itertools",
  "jemallocator",
  "lazy_static",
@@ -913,6 +923,49 @@ dependencies = [
  "png",
  "scoped_threadpool",
  "tiff",
+]
+
+[[package]]
+name = "imgui"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92a0077d3bb882960467aed0bc6eaf5d4033cb9b61bfdbb99c32d1288380032f"
+dependencies = [
+ "bitflags",
+ "imgui-sys",
+ "parking_lot",
+]
+
+[[package]]
+name = "imgui-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0522b693da8a64322afbb32c63c04f39d9b9435cc75199d630207eee48886fc1"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "imgui-wgpu"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8017f74f8880049c1c3fc055868486a610178ab93ad18eadaf5b0bb52f738365"
+dependencies = [
+ "bytemuck",
+ "imgui",
+ "log",
+ "smallvec 1.5.0",
+ "wgpu",
+]
+
+[[package]]
+name = "imgui-winit-support"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0669ee7f52b80aa33d5f45507790223380c253a8fd981ddf67d1427ab8ebc8bc"
+dependencies = [
+ "imgui",
+ "winit",
 ]
 
 [[package]]

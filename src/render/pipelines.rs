@@ -1,4 +1,4 @@
-trait ShaderModuleSourceExt<'a> {
+pub trait ShaderModuleSourceExt<'a> {
     fn as_ref<'b: 'a>(&'b self) -> wgpu::ShaderModuleSource<'b>;
 }
 
@@ -32,8 +32,7 @@ impl BindId {
     }
 }
 
-const WINDING_MODE: wgpu::FrontFace = wgpu::FrontFace::Ccw;
-
+pub const WINDING_MODE: wgpu::FrontFace = wgpu::FrontFace::Ccw;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// The world pipeline (unlike the skybox pipeline) does proper depth testing, although doesn't
@@ -680,11 +679,11 @@ pub mod models {
 /// that the rest of the pipelines write to can be larger or have more samples than the output
 /// buffer.
 pub mod postprocess {
-    use super::ShaderModuleSourceExt;
+    use super::{BindId, ShaderModuleSourceExt as _};
     use lazy_static::lazy_static;
 
     pub use super::Pipeline;
-    use crate::render::TexturedVertex;
+    use crate::render::PostVertex;
     use memoffset::offset_of;
     use std::mem;
 
@@ -700,6 +699,7 @@ pub mod postprocess {
     pub fn build(
         device: &wgpu::Device,
         diffuse_tex: &wgpu::TextureView,
+        bloom_tex: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         post_uniforms: &wgpu::Buffer,
         fragment_uniforms: &wgpu::Buffer,
@@ -707,11 +707,12 @@ pub mod postprocess {
         let vs_module = device.create_shader_module(VERTEX_SHADER.as_ref());
         let fs_module = device.create_shader_module(FRAGMENT_SHADER.as_ref());
 
+        let mut ids = BindId::default();
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bindgrouplayout_post"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                    binding: ids.next(),
                     visibility: wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::SampledTexture {
                         multisampled: true,
@@ -721,13 +722,23 @@ pub mod postprocess {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: ids.next(),
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::SampledTexture {
+                        multisampled: false,
+                        component_type: wgpu::TextureComponentType::Float,
+                        dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: ids.next(),
                     visibility: wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::Sampler { comparison: false },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: ids.next(),
                     visibility: wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::UniformBuffer {
                         dynamic: false,
@@ -736,8 +747,8 @@ pub mod postprocess {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
+                    binding: ids.next(),
+                    visibility: wgpu::ShaderStage::FRAGMENT,
                     ty: wgpu::BindingType::UniformBuffer {
                         dynamic: false,
                         min_binding_size: None,
@@ -781,22 +792,159 @@ pub mod postprocess {
             }],
             depth_stencil_state: None,
             vertex_state: wgpu::VertexStateDescriptor {
-                index_format: wgpu::IndexFormat::Uint32,
+                index_format: wgpu::IndexFormat::Uint16,
                 vertex_buffers: &[wgpu::VertexBufferDescriptor {
-                    stride: mem::size_of::<TexturedVertex>() as wgpu::BufferAddress,
+                    stride: mem::size_of::<PostVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::InputStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float3,
-                            offset: offset_of!(TexturedVertex, pos) as u64,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttributeDescriptor {
-                            format: wgpu::VertexFormat::Float2,
-                            offset: offset_of!(TexturedVertex, tex_coord) as u64,
-                            shader_location: 1,
-                        },
-                    ],
+                    attributes: &[wgpu::VertexAttributeDescriptor {
+                        format: wgpu::VertexFormat::Float2,
+                        offset: offset_of!(PostVertex, pos) as u64,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            sample_count: 1,
+            sample_mask: !0,
+            alpha_to_coverage_enabled: false,
+        });
+
+        let mut ids = BindId::default();
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bindgroup_post"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::TextureView(diffuse_tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::TextureView(bloom_tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::Buffer(fragment_uniforms.slice(..)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::Buffer(post_uniforms.slice(..)),
+                },
+            ],
+        });
+
+        Pipeline {
+            bind_group,
+            pipeline,
+        }
+    }
+}
+
+/// Hi-pass filter (at the level of luminosity)
+pub mod hipass {
+    use super::ShaderModuleSourceExt;
+    use lazy_static::lazy_static;
+
+    pub use super::Pipeline;
+    use crate::render::PostVertex;
+    use memoffset::offset_of;
+    use std::mem;
+
+    lazy_static! {
+        static ref VERTEX_SHADER: wgpu::ShaderModuleSource<'static> =
+            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/post.vert.spv"));
+        static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
+            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/hipass.frag.spv"));
+    }
+
+    pub const DIFFUSE_BUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg11b10Float;
+
+    pub fn build(
+        device: &wgpu::Device,
+        diffuse_tex: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        post_uniforms: &wgpu::Buffer,
+    ) -> Pipeline {
+        let vs_module = device.create_shader_module(VERTEX_SHADER.as_ref());
+        let fs_module = device.create_shader_module(FRAGMENT_SHADER.as_ref());
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bindgrouplayout_post"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::SampledTexture {
+                        multisampled: true,
+                        component_type: wgpu::TextureComponentType::Float,
+                        dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler { comparison: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::UniformBuffer {
+                        dynamic: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex_stage: wgpu::ProgrammableStageDescriptor {
+                module: &vs_module,
+                entry_point: "main",
+            },
+            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+                module: &fs_module,
+                entry_point: "main",
+            }),
+            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
+                front_face: super::WINDING_MODE,
+                cull_mode: wgpu::CullMode::Back,
+                depth_bias: 0,
+                depth_bias_slope_scale: 0.0,
+                depth_bias_clamp: 0.0,
+                clamp_depth: false,
+            }),
+            primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: super::postprocess::DIFFUSE_BUFFER_FORMAT,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
+            depth_stencil_state: None,
+            vertex_state: wgpu::VertexStateDescriptor {
+                index_format: wgpu::IndexFormat::Uint16,
+                vertex_buffers: &[wgpu::VertexBufferDescriptor {
+                    stride: mem::size_of::<PostVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::InputStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttributeDescriptor {
+                        format: wgpu::VertexFormat::Float2,
+                        offset: offset_of!(PostVertex, pos) as u64,
+                        shader_location: 0,
+                    }],
                 }],
             },
             sample_count: 1,
@@ -818,10 +966,6 @@ pub mod postprocess {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Buffer(fragment_uniforms.slice(..)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
                     resource: wgpu::BindingResource::Buffer(post_uniforms.slice(..)),
                 },
             ],

@@ -1,9 +1,12 @@
-use crate::cache::{AlignedBufferCache, Atlas, BufferCache, BufferCacheMut, CacheCommon};
+use crate::{
+    cache::{AlignedBufferCache, Atlas, BufferCache, BufferCacheMut, CacheCommon},
+    gui, kawase,
+};
 use bytemuck::{Pod, Zeroable};
 use std::{convert::TryFrom, iter, mem, num::NonZeroU8, ops::Range};
 use wgpu::util::DeviceExt;
 
-mod pipelines;
+pub mod pipelines;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Camera {
@@ -308,12 +311,12 @@ pub trait World {
 
 impl World for () {}
 
-struct MsaaBuffer {
+struct MsaaTexture {
     factor: NonZeroU8,
     diffuse_buffer: wgpu::TextureView,
 }
 
-struct Uniforms<T> {
+pub struct Uniforms<T> {
     dirty: bool,
     buffer: wgpu::Buffer,
     value: T,
@@ -371,16 +374,24 @@ pub struct Renderer {
     matrices_buffer: wgpu::Buffer,
     fragment_uniforms: Uniforms<FragmentUniforms>,
     post_uniforms: Uniforms<PostUniforms>,
+    hipass_uniforms: Uniforms<HipassUniforms>,
     out_size: (u32, u32),
     nearest_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
+    kawase_blur: Option<kawase::Blur>,
     world_pipeline: Option<pipelines::world::Pipeline>,
     skybox_pipeline: Option<pipelines::sky::Pipeline>,
     model_pipeline: Option<pipelines::models::Pipeline>,
     post_pipeline: Option<pipelines::postprocess::Pipeline>,
+    hipass_pipeline: Option<pipelines::hipass::Pipeline>,
     msaa_factor: NonZeroU8,
-    post_buffer: Option<MsaaBuffer>,
-    msaa_verts: wgpu::Buffer,
+    bloom_enabled: bool,
+    bloom_downsample: u8,
+    bloom_iterations: usize,
+    bloom_radius: f32,
+    bloom_texture: Option<wgpu::TextureView>,
+    post_texture: Option<MsaaTexture>,
+    post_verts: wgpu::Buffer,
     depth_buffer: Option<wgpu::TextureView>,
 }
 
@@ -391,8 +402,8 @@ const DIFFUSE_ATLAS_EXTENT: wgpu::Extent3d = wgpu::Extent3d {
     depth: 1,
 };
 const LIGHTMAP_ATLAS_EXTENT: wgpu::Extent3d = wgpu::Extent3d {
-    width: 2048,
-    height: 2048,
+    width: 4096,
+    height: 4096,
     depth: 1,
 };
 
@@ -433,6 +444,14 @@ pub struct TexturedVertex {
 
 unsafe impl Pod for TexturedVertex {}
 unsafe impl Zeroable for TexturedVertex {}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PostVertex {
+    pub pos: [f32; 2],
+}
+
+unsafe impl Pod for PostVertex {}
+unsafe impl Zeroable for PostVertex {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorldVertex {
@@ -621,15 +640,27 @@ struct Matrices {
     projection: cgmath::Matrix4<f32>,
 }
 
-/// The view and projection matrices_buffer, used by the vertex shader.
-/// Since we only split these out to make implementing the sky
-/// shader simpler, the "projection matrix" actually includes
-/// rotation - we just don't do translation.
+const TONEMAPPING_MASK: u32 = 0b0001;
+const XYY_ACES_MASK: u32 = 0b0010;
+const CROSSTALK_MASK: u32 = 0b0100;
+const XYY_CROSSTALK_MASK: u32 = 0b1000;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 struct PostUniforms {
     inv_resolution: cgmath::Vector2<f32>,
-    fxaa_enabled: bool,
+    // TODO: Use `bitflags!`
+    tonemapping_bitmap: u32,
+    inv_crosstalk_amt: f32,
+    saturation: f32,
+    crosstalk_saturation: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+struct HipassUniforms {
+    inv_resolution: cgmath::Vector2<f32>,
+    cutoff: f32,
 }
 
 /// The uniforms used by the
@@ -654,6 +685,9 @@ unsafe impl Zeroable for PostUniforms {}
 
 unsafe impl Pod for FragmentUniforms {}
 unsafe impl Zeroable for FragmentUniforms {}
+
+unsafe impl Pod for HipassUniforms {}
+unsafe impl Zeroable for HipassUniforms {}
 
 pub const MAX_LIGHTS: usize = 128;
 const MINIMUM_ALIGNMENT: usize = 256;
@@ -697,25 +731,12 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        #[derive(Debug, Copy, Clone)]
-        #[repr(C, align(256))]
-        struct Count(u32);
-
-        unsafe impl Pod for Count {}
-        unsafe impl Zeroable for Count {}
-
-        let mut counts = [Count(0u32); MAX_LIGHTS];
-
-        for i in 0..MAX_LIGHTS {
-            counts[i] = Count(i as u32);
-        }
-
         let fragment_uniforms = Uniforms::new(
             FragmentUniforms {
                 inv_gamma: gamma.recip(),
                 intensity,
                 animation_frame: 0.,
-                ambient_light: 0.0,
+                ambient_light: 0.,
             },
             device,
         );
@@ -723,45 +744,34 @@ impl Renderer {
         let post_uniforms = Uniforms::new(
             PostUniforms {
                 inv_resolution: 1. / cgmath::Vector2::new(out_size.0 as f32, out_size.1 as f32),
-                fxaa_enabled: false,
+                tonemapping_bitmap: TONEMAPPING_MASK
+                    | CROSSTALK_MASK
+                    | XYY_ACES_MASK
+                    | XYY_CROSSTALK_MASK,
+                inv_crosstalk_amt: 1.0,
+                saturation: 1.1,
+                crosstalk_saturation: 2.,
             },
             device,
         );
 
-        let atlas_texture = [0, 0, 1, 1];
-        let msaa_verts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let hipass_uniforms = Uniforms::new(
+            HipassUniforms {
+                inv_resolution: 1. / cgmath::Vector2::new(out_size.0 as f32, out_size.1 as f32),
+                cutoff: 0.0,
+            },
+            device,
+        );
+
+        let post_verts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&[
-                TexturedVertex {
-                    pos: [-1., -1., 0.],
-                    tex_coord: [0., 1.],
-                    atlas_texture,
-                },
-                TexturedVertex {
-                    pos: [1., -1., 0.],
-                    tex_coord: [1., 1.],
-                    atlas_texture,
-                },
-                TexturedVertex {
-                    pos: [1., 1., 0.],
-                    tex_coord: [1., 0.],
-                    atlas_texture,
-                },
-                TexturedVertex {
-                    pos: [1., 1., 0.],
-                    tex_coord: [1., 0.],
-                    atlas_texture,
-                },
-                TexturedVertex {
-                    pos: [-1., 1., 0.],
-                    tex_coord: [0., 0.],
-                    atlas_texture,
-                },
-                TexturedVertex {
-                    pos: [-1., -1., 0.],
-                    tex_coord: [0., 1.],
-                    atlas_texture,
-                },
+                PostVertex { pos: [-1., -1.] },
+                PostVertex { pos: [1., -1.] },
+                PostVertex { pos: [1., 1.] },
+                PostVertex { pos: [1., 1.] },
+                PostVertex { pos: [-1., 1.] },
+                PostVertex { pos: [-1., -1.] },
             ]),
             usage: wgpu::BufferUsage::VERTEX,
         });
@@ -770,7 +780,10 @@ impl Renderer {
             out_size,
             matrices_buffer,
             fragment_uniforms,
+            hipass_uniforms,
             post_uniforms,
+            kawase_blur: None,
+            hipass_pipeline: None,
             world_pipeline: None,
             skybox_pipeline: None,
             model_pipeline: None,
@@ -779,8 +792,13 @@ impl Renderer {
             linear_sampler,
             cache,
             msaa_factor: NonZeroU8::new(1).unwrap(),
-            post_buffer: None,
-            msaa_verts,
+            bloom_enabled: true,
+            bloom_downsample: 1,
+            bloom_iterations: 4,
+            bloom_radius: 1.,
+            bloom_texture: None,
+            post_texture: None,
+            post_verts,
             depth_buffer: None,
         }
     }
@@ -788,30 +806,99 @@ impl Renderer {
     pub fn set_size(&mut self, size: (u32, u32)) {
         if size != self.out_size {
             self.out_size = size;
-            self.post_buffer = None;
+            self.post_texture = None;
             self.depth_buffer = None;
             self.post_uniforms.update(|uniforms| {
+                uniforms.inv_resolution = 1. / cgmath::Vector2::new(size.0 as f32, size.1 as f32)
+            });
+            self.hipass_uniforms.update(|uniforms| {
                 uniforms.inv_resolution = 1. / cgmath::Vector2::new(size.0 as f32, size.1 as f32)
             });
         }
     }
 
-    pub fn toggle_fxaa(&mut self) {
-        self.post_uniforms
-            .update(|uniforms| uniforms.fxaa_enabled = !uniforms.fxaa_enabled);
-    }
-
     pub fn set_msaa_factor(&mut self, factor: u8) {
         self.msaa_factor = NonZeroU8::new(factor).unwrap();
         if self
-            .post_buffer
+            .post_texture
             .as_ref()
             .map(|buf| buf.factor)
             .unwrap_or(NonZeroU8::new(1).unwrap())
             != self.msaa_factor
         {
-            self.post_buffer = None;
+            self.post_texture = None;
             self.depth_buffer = None;
+        }
+    }
+
+    pub fn update_config(&mut self, f: impl FnOnce(&mut gui::Config) -> gui::ConfigDirty) {
+        let mut config = gui::Config {
+            gamma: self.gamma(),
+            intensity: self.intensity(),
+            tonemapping: gui::Tonemapping {
+                enabled: self.post_uniforms.get().tonemapping_bitmap & TONEMAPPING_MASK != 0,
+                xyy_aces: self.post_uniforms.get().tonemapping_bitmap & XYY_ACES_MASK != 0,
+                crosstalk: self.post_uniforms.get().tonemapping_bitmap & CROSSTALK_MASK != 0,
+                xyy_crosstalk: self.post_uniforms.get().tonemapping_bitmap & XYY_CROSSTALK_MASK
+                    != 0,
+                crosstalk_amt: self.crosstalk_amount(),
+                saturation: self.post_uniforms.get().saturation,
+                crosstalk_saturation: self.post_uniforms.get().crosstalk_saturation,
+            },
+            bloom: gui::Bloom {
+                enabled: self.bloom_enabled,
+                radius: self.bloom_radius,
+                cutoff: self.hipass_uniforms.get().cutoff,
+            },
+        };
+
+        let dirty = f(&mut config);
+
+        if dirty.gamma {
+            self.set_gamma(config.gamma);
+        }
+
+        if dirty.intensity {
+            self.set_intensity(config.intensity);
+        }
+
+        if dirty.tonemapping {
+            self.set_crosstalk_amount(config.tonemapping.crosstalk_amt);
+            self.post_uniforms.update(|uniforms| {
+                let mut bitmap = 0;
+
+                if config.tonemapping.enabled {
+                    bitmap |= TONEMAPPING_MASK;
+                }
+
+                if config.tonemapping.xyy_aces {
+                    bitmap |= XYY_ACES_MASK;
+                }
+
+                if config.tonemapping.crosstalk {
+                    bitmap |= CROSSTALK_MASK;
+                }
+
+                if config.tonemapping.xyy_crosstalk {
+                    bitmap |= XYY_CROSSTALK_MASK;
+                }
+
+                uniforms.tonemapping_bitmap = bitmap;
+                uniforms.saturation = config.tonemapping.saturation;
+                uniforms.crosstalk_saturation = config.tonemapping.crosstalk_saturation;
+            });
+        }
+
+        if dirty.bloom {
+            self.bloom_enabled = config.bloom.enabled;
+
+            self.bloom_radius = config.bloom.radius;
+            if let Some(blur) = self.kawase_blur.as_mut() {
+                blur.set_radius(self.bloom_radius);
+            }
+
+            self.hipass_uniforms
+                .update(|uniforms| uniforms.cutoff = config.bloom.cutoff);
         }
     }
 
@@ -826,6 +913,15 @@ impl Renderer {
 
     pub fn gamma(&self) -> f32 {
         self.fragment_uniforms.get().inv_gamma.recip()
+    }
+
+    pub fn set_crosstalk_amount(&mut self, crosstalk_amt: f32) {
+        self.post_uniforms
+            .update(|uniforms| uniforms.inv_crosstalk_amt = crosstalk_amt.recip());
+    }
+
+    pub fn crosstalk_amount(&mut self) -> f32 {
+        self.post_uniforms.get().inv_crosstalk_amt.recip()
     }
 
     pub fn set_intensity(&mut self, intensity: f32) {
@@ -899,7 +995,7 @@ impl Renderer {
     }
 
     fn update_msaa_buffer(&mut self, device: &wgpu::Device) {
-        if self.post_buffer.as_ref().map(|buf| buf.factor) != Some(self.msaa_factor) {
+        if self.post_texture.as_ref().map(|buf| buf.factor) != Some(self.msaa_factor) {
             let (width, height) = self.out_size;
 
             let buffer = device.create_texture(&wgpu::TextureDescriptor {
@@ -916,7 +1012,7 @@ impl Renderer {
                 usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
             });
 
-            self.post_buffer = Some(MsaaBuffer {
+            self.post_texture = Some(MsaaTexture {
                 factor: self.msaa_factor,
                 diffuse_buffer: buffer.create_view(&wgpu::TextureViewDescriptor::default()),
             });
@@ -925,14 +1021,53 @@ impl Renderer {
             self.world_pipeline = None;
             self.model_pipeline = None;
 
-            let MsaaBuffer { diffuse_buffer, .. } = self.post_buffer.as_ref().unwrap();
+            let MsaaTexture { diffuse_buffer, .. } = self.post_texture.as_ref().unwrap();
+
+            let bloom_texture = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("msaa_diffuse_buffer"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: pipelines::postprocess::DIFFUSE_BUFFER_FORMAT,
+                    usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
+                })
+                .create_view(&Default::default());
+
+            self.hipass_pipeline = Some(pipelines::hipass::build(
+                device,
+                diffuse_buffer,
+                &self.linear_sampler,
+                &self.hipass_uniforms.buffer(),
+            ));
+
+            let blur = kawase::Blur::new(
+                device,
+                &bloom_texture,
+                &self.linear_sampler,
+                self.bloom_iterations,
+                self.bloom_downsample,
+                self.bloom_radius,
+                self.out_size,
+            );
+
+            self.bloom_texture = Some(bloom_texture);
+
             self.post_pipeline = Some(pipelines::postprocess::build(
                 device,
                 diffuse_buffer,
+                blur.output(),
                 &self.linear_sampler,
                 &self.post_uniforms.buffer(),
                 &self.fragment_uniforms.buffer(),
             ));
+
+            self.kawase_blur = Some(blur);
         }
     }
 
@@ -974,18 +1109,15 @@ impl Renderer {
     pub fn render<'a, F>(
         &mut self,
         device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
         camera: &Camera,
         screen_tex: &wgpu::TextureView,
         queue: &wgpu::Queue,
         render: F,
-    ) -> impl Iterator<Item = wgpu::CommandBuffer>
-    where
+    ) where
         F: FnOnce(RenderContext<'_>),
     {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render"),
-        });
-        self.cache.update(device, &mut encoder);
+        self.cache.update(device, encoder);
 
         self.update_msaa_buffer(device);
         self.make_pipelines(device);
@@ -993,7 +1125,7 @@ impl Renderer {
         let indices = if let Some(i) = self.cache.indices.as_ref() {
             i
         } else {
-            return None.into_iter();
+            return;
         };
 
         let translation = camera.translation();
@@ -1008,6 +1140,7 @@ impl Renderer {
         );
 
         self.fragment_uniforms.write_if_dirty(queue);
+        self.hipass_uniforms.write_if_dirty(queue);
         self.post_uniforms.write_if_dirty(queue);
 
         let depth = if let Some(depth) = &self.depth_buffer {
@@ -1018,7 +1151,7 @@ impl Renderer {
         };
 
         {
-            let MsaaBuffer { diffuse_buffer, .. } = self.post_buffer.as_ref().unwrap();
+            let MsaaTexture { diffuse_buffer, .. } = self.post_texture.as_ref().unwrap();
 
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
@@ -1053,6 +1186,33 @@ impl Renderer {
             });
         }
 
+        if self.bloom_enabled {
+            {
+                let mut hipass_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+                        attachment: self.bloom_texture.as_ref().unwrap(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    }],
+                    depth_stencil_attachment: None,
+                });
+
+                hipass_pass.set_pipeline(&self.hipass_pipeline.as_ref().unwrap().pipeline);
+                hipass_pass.set_bind_group(
+                    0,
+                    &self.hipass_pipeline.as_ref().unwrap().bind_group,
+                    &[],
+                );
+                hipass_pass.set_vertex_buffer(0, self.post_verts.slice(..));
+                hipass_pass.draw(0..6, 0..1);
+            }
+
+            self.kawase_blur.as_ref().unwrap().blur(encoder);
+        }
+
         {
             let mut post_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
@@ -1068,10 +1228,8 @@ impl Renderer {
 
             post_pass.set_pipeline(&self.post_pipeline.as_ref().unwrap().pipeline);
             post_pass.set_bind_group(0, &self.post_pipeline.as_ref().unwrap().bind_group, &[]);
-            post_pass.set_vertex_buffer(0, self.msaa_verts.slice(..));
+            post_pass.set_vertex_buffer(0, self.post_verts.slice(..));
             post_pass.draw(0..6, 0..1);
         }
-
-        Some(encoder.finish()).into_iter()
     }
 }

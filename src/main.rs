@@ -17,7 +17,9 @@ use winit_async::{EventAsync as Event, EventLoopAsync};
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 mod assets;
+mod kawase;
 mod cache;
+mod gui;
 mod loader;
 mod render;
 
@@ -26,6 +28,19 @@ use loader::{Load, LoadAsset, Loader};
 use render::{Camera, Renderer};
 
 const DEFAULT_SIZE: (u32, u32) = (800, 600);
+
+fn to_normal_event<E>(event: Event<E>) -> Option<winit::event::Event<'static, E>> {
+    match event {
+        Event::WindowEvent { window_id, event } => {
+            Some(winit::event::Event::WindowEvent { window_id, event })
+        }
+        Event::DeviceEvent { device_id, event } => {
+            Some(winit::event::Event::DeviceEvent { device_id, event })
+        }
+        Event::UserEvent(val) => Some(winit::event::Event::UserEvent(val)),
+        Event::Suspended | Event::Resumed => None,
+    }
+}
 
 async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window) {
     let (width, height) = DEFAULT_SIZE;
@@ -64,9 +79,32 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device, size.into(), 1.6, 1.0);
+    let mut renderer = Renderer::init(&device, size.into(), 1.2, 1.0);
     let mut sky = None;
     let mut camera = None;
+    let mut imgui = imgui::Context::create();
+    let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
+    imgui_platform.attach_window(
+        imgui.io_mut(),
+        &window,
+        imgui_winit_support::HiDpiMode::Default,
+    );
+    imgui.set_ini_filename(None);
+
+    let hidpi_factor = window.scale_factor();
+    let font_size = (13.0 * hidpi_factor) as f32;
+    imgui.io_mut().font_global_scale = (1.0 / hidpi_factor) as f32;
+
+    imgui
+        .fonts()
+        .add_font(&[imgui::FontSource::DefaultFontData {
+            config: Some(imgui::FontConfig {
+                oversample_h: 1,
+                pixel_snap_h: true,
+                size_pixels: font_size,
+                ..Default::default()
+            }),
+        }]);
 
     'find_special_entities: for entity in bsp.entities.iter() {
         let mut is_player_start = false;
@@ -170,6 +208,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
     const MOVEMENT_VEL: cgmath::Vector3<f32> = cgmath::Vector3::new(400., 0., 0.);
 
     let mut locked_mouse = false;
+    let mut last_cursor = None;
+    let mut debug_gui = false;
     let mut keys_down = HashSet::default();
 
     let update_dt = time::Duration::from_secs_f64(DT);
@@ -178,12 +218,25 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut consecutive_timeouts = 0usize;
 
+    // IMGUI SETUP
+    let renderer_config = imgui_wgpu::RendererConfig {
+        texture_format: sc_desc.format,
+        ..Default::default()
+    };
+    let mut imgui_renderer =
+        imgui_wgpu::Renderer::new(&mut imgui, &device, &queue, renderer_config);
+    // END IMGUI SETUP (TODO: Extract to function)
+
+    let mut frametimes = arraydeque::ArrayDeque::<[f64; 64], arraydeque::Wrapping>::new();
+
     event_loop.run_async(async move |mut runner| 'main: loop {
         runner.wait().await;
 
         let now = time::Instant::now();
 
         let mut elapsed = now - last_update_inst;
+
+        frametimes.push_back(elapsed.as_secs_f64());
 
         if elapsed >= update_dt {
             while elapsed >= update_dt {
@@ -237,8 +290,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
         let mut events = runner.recv_events().await;
         while let Some(event) = events.next().await {
-            match event {
-                Event::WindowEvent {
+            let captured = match &event {
+                &Event::WindowEvent {
                     event: WindowEvent::Resized(size),
                     ..
                 } => {
@@ -249,12 +302,12 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     camera.set_aspect_ratio(sc_desc.width, sc_desc.height);
 
                     renderer.set_size(size.into());
+
+                    false
                 }
 
                 Event::WindowEvent { event, .. } => match event {
-                    WindowEvent::CloseRequested => {
-                        break 'main;
-                    }
+                    WindowEvent::CloseRequested => break 'main,
 
                     WindowEvent::KeyboardInput {
                         input:
@@ -268,18 +321,10 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                         locked_mouse = false;
                         window.set_cursor_grab(false).unwrap();
                         window.set_cursor_visible(true);
-                    }
-                    WindowEvent::MouseInput {
-                        state: event::ElementState::Pressed,
-                        button: event::MouseButton::Left,
-                        ..
-                    } => {
-                        locked_mouse = !locked_mouse;
 
-                        window.set_cursor_visible(!locked_mouse);
-                        window.set_cursor_grab(locked_mouse).unwrap();
+                        true
                     }
-                    WindowEvent::KeyboardInput {
+                    &WindowEvent::KeyboardInput {
                         input:
                             event::KeyboardInput {
                                 virtual_keycode: Some(keycode),
@@ -287,54 +332,31 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                                 ..
                             },
                         ..
-                    } => {
-                        const MIN_GAMMA: f32 = 0.1;
-                        const MAX_GAMMA: f32 = 8.0;
+                    } => match keycode {
+                        event::VirtualKeyCode::Grave => {
+                            debug_gui = !debug_gui;
+                            locked_mouse &= !debug_gui;
 
-                        const MIN_INTENSITY: f32 = 0.1;
-                        const MAX_INTENSITY: f32 = 20.0;
+                            window.set_cursor_visible(!locked_mouse);
+                            window.set_cursor_grab(locked_mouse).unwrap();
 
-                        match keycode {
-                            event::VirtualKeyCode::T => {
-                                renderer.toggle_fxaa();
-                            }
-                            event::VirtualKeyCode::O => {
-                                renderer
-                                    .set_msaa_factor((renderer.msaa_factor() / 2).max(1).min(8));
-                            }
-                            event::VirtualKeyCode::P => {
-                                renderer
-                                    .set_msaa_factor((renderer.msaa_factor() * 2).max(1).min(8));
-                            }
-                            event::VirtualKeyCode::K => {
-                                renderer.set_gamma(
-                                    (renderer.gamma() - 0.05).max(MIN_GAMMA).min(MAX_GAMMA),
-                                );
-                            }
-                            event::VirtualKeyCode::L => {
-                                renderer.set_gamma(
-                                    (renderer.gamma() + 0.05).max(MIN_GAMMA).min(MAX_GAMMA),
-                                );
-                            }
-                            event::VirtualKeyCode::H => {
-                                renderer.set_intensity(
-                                    (renderer.intensity() - 0.2)
-                                        .max(MIN_INTENSITY)
-                                        .min(MAX_INTENSITY),
-                                );
-                            }
-                            event::VirtualKeyCode::J => {
-                                renderer.set_intensity(
-                                    (renderer.intensity() + 0.2)
-                                        .max(MIN_INTENSITY)
-                                        .min(MAX_INTENSITY),
-                                );
-                            }
-                            keycode => {
-                                keys_down.insert(keycode);
-                            }
+                            true
                         }
-                    }
+                        event::VirtualKeyCode::Space if !debug_gui => {
+                            locked_mouse = !locked_mouse;
+
+                            window.set_cursor_visible(!locked_mouse);
+                            window.set_cursor_grab(locked_mouse).unwrap();
+
+                            true
+                        }
+                        keycode if !debug_gui => {
+                            keys_down.insert(keycode);
+
+                            true
+                        }
+                        _ => false,
+                    },
                     WindowEvent::KeyboardInput {
                         input:
                             event::KeyboardInput {
@@ -345,10 +367,11 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                         ..
                     } => {
                         keys_down.remove(&keycode);
+                        true
                     }
-                    _ => {}
+                    _ => false,
                 },
-                Event::DeviceEvent {
+                &Event::DeviceEvent {
                     event: DeviceEvent::MouseMotion { delta: (dx, dy) },
                     ..
                 } if locked_mouse => {
@@ -356,8 +379,16 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                     camera.update_pitch(|p| p + cgmath::Deg::from(cgmath::Rad(dy / 100.0)));
                     camera.update_yaw(|y| y - cgmath::Deg::from(cgmath::Rad(dx / 100.0)));
+
+                    true
                 }
-                _ => {}
+                _ => false,
+            };
+
+            if !captured {
+                if let Some(event) = to_normal_event(event) {
+                    imgui_platform.handle_event(imgui.io_mut(), &window, &event);
+                }
             }
         }
 
@@ -381,8 +412,14 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                     renderer.transfer_data(&queue, std::iter::once(&model));
 
-                    queue.submit(renderer.render(
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("render"),
+                        });
+
+                    renderer.render(
                         &device,
+                        &mut encoder,
                         &camera,
                         &frame.output.view,
                         &queue,
@@ -397,7 +434,48 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                             ctx.render(&model);
                         },
-                    ));
+                    );
+
+                    if debug_gui {
+                        let mut imgui_pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+                                    attachment: &frame.output.view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: true,
+                                    },
+                                }],
+                                depth_stencil_attachment: None,
+                            });
+
+                        imgui.io_mut().update_delta_time(elapsed);
+
+                        imgui_platform
+                            .prepare_frame(imgui.io_mut(), &window)
+                            .expect("Failed to prepare frame");
+                        let ui = imgui.frame();
+
+                        renderer.update_config(|config| {
+                            gui::draw(
+                                &ui,
+                                config,
+                                frametimes.iter().copied().sum::<f64>() / frametimes.len() as f64,
+                            )
+                        });
+
+                        if last_cursor != Some(ui.mouse_cursor()) {
+                            last_cursor = Some(ui.mouse_cursor());
+                            imgui_platform.prepare_render(&ui, &window);
+                        }
+
+                        imgui_renderer
+                            .render(ui.render(), &queue, &device, &mut imgui_pass)
+                            .expect("Rendering failed");
+                    }
+
+                    queue.submit(iter::once(encoder.finish()));
                 }
                 Err(_) => {
                     consecutive_timeouts += 1;
@@ -422,17 +500,16 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 fn main() {
     let loader = loader::Loader::new();
 
-    let bsp = Bsp::read(
-        loader
-            .maps()
-            .load(std::path::PathBuf::from(std::env::args().nth(1).unwrap()).into())
-            .unwrap()
-            .0,
-    )
-    .unwrap();
+    let (file, path) = loader
+        .maps()
+        .load(std::path::PathBuf::from(std::env::args().nth(1).unwrap()).into())
+        .unwrap();
+    let bsp = Bsp::read(file).unwrap();
 
     let events = EventLoop::new_any_thread();
-    let window = Window::new(&events).unwrap();
+    let mut window = Window::new(&events).unwrap();
+
+    window.set_title(&format!("Göld - {}", path.display()));
 
     futures::executor::block_on(run(loader, bsp, events, window));
 }

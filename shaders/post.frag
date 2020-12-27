@@ -17,6 +17,7 @@ layout(set = 0, binding = 4) uniform PostLocals {
     float a_InvCrosstalkAmt;
     float a_Saturation;
     float a_CrosstalkSaturation;
+    float a_BloomInfluence;
 };
 
 float luminance(vec3 color) {
@@ -84,6 +85,10 @@ vec3 exposure(vec3 color) {
     );
 }
 
+float exposure(float val) {
+    return 1 - exp(-val);
+}
+
 vec4 exposure(vec4 color) {
     return vec4(exposure(vec3(color)), color.a);
 }
@@ -129,7 +134,10 @@ vec3 crosstalkLum(vec3 tonemapped) {
 }
 
 void main() {
-    vec3 diffuse = texture(sampler2D(t_Bloom, s_Color), gl_FragCoord.xy * a_InvResolution).rgb * intensity;
+    vec3 diffuse = texture(sampler2D(t_Diffuse, s_Color), gl_FragCoord.xy * a_InvResolution).rgb * intensity;
+    vec3 bloom = texture(sampler2D(t_Bloom, s_Color), gl_FragCoord.xy * a_InvResolution).rgb;
+
+    diffuse = bloom * a_BloomInfluence + diffuse;
 
     bool tonemapping = (a_TonemappingBitmap & 0x1) != 0;
     bool xyySpaceAces = (a_TonemappingBitmap & 0x2) != 0;

@@ -33,6 +33,18 @@ float ifLt(float a, float b, float ifTrue, float ifFalse) {
     return ifFalse * ge + ifTrue * (1 - ge);
 }
 
+float acesLum(float lum) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+
+    lum = (lum * (a * lum + b)) / (lum * (c * lum + d) + e);
+
+    return lum;
+}
+
 void main() {
     uint texCount;
     vec2 texCoord;
@@ -64,7 +76,7 @@ void main() {
         )
     );
 
-    vec4 light = vec4(vec3(v_Value), 1.);
+    vec4 light = vec4(vec3(acesLum(v_Value)), 1.);
 
     ivec2 lightmapSize = textureSize(sampler2D(t_Lightmap, s_Lightmap), 0);
 

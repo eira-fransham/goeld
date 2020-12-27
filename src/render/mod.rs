@@ -654,6 +654,7 @@ struct PostUniforms {
     inv_crosstalk_amt: f32,
     saturation: f32,
     crosstalk_saturation: f32,
+    bloom_influence: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -661,6 +662,7 @@ struct PostUniforms {
 struct HipassUniforms {
     inv_resolution: cgmath::Vector2<f32>,
     cutoff: f32,
+    intensity: f32,
 }
 
 /// The uniforms used by the
@@ -751,6 +753,7 @@ impl Renderer {
                 inv_crosstalk_amt: 1.0,
                 saturation: 1.1,
                 crosstalk_saturation: 2.,
+                bloom_influence: 0.2,
             },
             device,
         );
@@ -758,7 +761,8 @@ impl Renderer {
         let hipass_uniforms = Uniforms::new(
             HipassUniforms {
                 inv_resolution: 1. / cgmath::Vector2::new(out_size.0 as f32, out_size.1 as f32),
-                cutoff: 0.0,
+                cutoff: 1.0,
+                intensity,
             },
             device,
         );
@@ -849,6 +853,7 @@ impl Renderer {
                 enabled: self.bloom_enabled,
                 radius: self.bloom_radius,
                 cutoff: self.hipass_uniforms.get().cutoff,
+                influence: self.post_uniforms.get().bloom_influence,
             },
         };
 
@@ -899,6 +904,8 @@ impl Renderer {
 
             self.hipass_uniforms
                 .update(|uniforms| uniforms.cutoff = config.bloom.cutoff);
+            self.post_uniforms
+                .update(|uniforms| uniforms.bloom_influence = config.bloom.influence);
         }
     }
 
@@ -926,6 +933,8 @@ impl Renderer {
 
     pub fn set_intensity(&mut self, intensity: f32) {
         self.fragment_uniforms
+            .update(|uniforms| uniforms.intensity = intensity);
+        self.hipass_uniforms
             .update(|uniforms| uniforms.intensity = intensity);
     }
 
@@ -1025,7 +1034,7 @@ impl Renderer {
 
             let bloom_texture = device
                 .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("msaa_diffuse_buffer"),
+                    label: Some("bloom_buffer"),
                     size: wgpu::Extent3d {
                         width,
                         height,
@@ -1142,6 +1151,10 @@ impl Renderer {
         self.fragment_uniforms.write_if_dirty(queue);
         self.hipass_uniforms.write_if_dirty(queue);
         self.post_uniforms.write_if_dirty(queue);
+
+        if let Some(blur) = self.kawase_blur.as_mut() {
+            blur.write_if_dirty(queue);
+        }
 
         let depth = if let Some(depth) = &self.depth_buffer {
             depth

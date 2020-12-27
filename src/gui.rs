@@ -15,6 +15,7 @@ pub struct Bloom {
     pub enabled: bool,
     pub radius: f32,
     pub cutoff: f32,
+    pub influence: f32,
 }
 
 pub struct Config {
@@ -112,6 +113,9 @@ pub fn draw(ui: &Ui<'_>, config: &mut Config, avg: f64) -> ConfigDirty {
                         .build();
                     out.bloom |= ui
                         .input_float(im_str!("Bloom cutoff"), &mut config.bloom.cutoff)
+                        .build();
+                    out.bloom |= ui
+                        .input_float(im_str!("Bloom influence"), &mut config.bloom.influence)
                         .build();
                 }
             }

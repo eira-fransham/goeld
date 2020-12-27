@@ -872,7 +872,7 @@ pub mod hipass {
         let fs_module = device.create_shader_module(FRAGMENT_SHADER.as_ref());
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bindgrouplayout_post"),
+            label: Some("bindgrouplayout_hipass"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,

@@ -239,7 +239,7 @@ impl Blur {
             uniforms: wgpu::Buffer,
         }
 
-        for i in 1..iterations {
+        for i in 0..iterations {
             let downsample = initial_downsample as usize + i;
 
             let resolution = (
@@ -302,8 +302,6 @@ impl Blur {
                 bind_group,
             });
         }
-
-        let mut targets = Vec::with_capacity(iterations);
 
         let output_size = (
             framebuffer_size.0 >> initial_downsample,
@@ -416,6 +414,10 @@ impl Blur {
 
     pub fn output(&self) -> &wgpu::TextureView {
         &self.output
+    }
+
+    pub fn write_if_dirty(&mut self, queue: &wgpu::Queue) {
+        self.uniforms.write_if_dirty(queue);
     }
 
     pub fn blur(&self, encoder: &mut wgpu::CommandEncoder) {

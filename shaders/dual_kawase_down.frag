@@ -22,5 +22,5 @@ void main() {
     sum += texture(sampler2D(t_Diffuse, s_Color), uv + vec2(1.0, -1.0) * a_Offset);
     sum += texture(sampler2D(t_Diffuse, s_Color), uv - vec2(1.0, -1.0) * a_Offset);
 
-    outColor = sum / 8.0;
+    outColor = sum / 8;
 }

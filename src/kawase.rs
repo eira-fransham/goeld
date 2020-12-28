@@ -218,6 +218,7 @@ impl Blur {
         device: &wgpu::Device,
         input: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        downsample_factor: f64,
         iterations: usize,
         initial_downsample: u8,
         radius: f32,
@@ -240,11 +241,12 @@ impl Blur {
         }
 
         for i in 0..iterations {
-            let downsample = initial_downsample as usize + i;
+            let downsample_power = initial_downsample as usize + i;
+            let downsample_amount = downsample_factor.powi(downsample_power as i32);
 
             let resolution = (
-                framebuffer_size.0 >> downsample,
-                framebuffer_size.1 >> downsample,
+                (framebuffer_size.0 as f64 / downsample_amount) as u32,
+                (framebuffer_size.1 as f64 / downsample_amount) as u32,
             );
 
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -303,9 +305,11 @@ impl Blur {
             });
         }
 
+        let downsample_amount = downsample_factor.powi(initial_downsample as i32);
+
         let output_size = (
-            framebuffer_size.0 >> initial_downsample,
-            framebuffer_size.1 >> initial_downsample,
+            (framebuffer_size.0 as f64 / downsample_amount) as u32,
+            (framebuffer_size.1 as f64 / downsample_amount) as u32,
         );
         let output = device.create_texture(&wgpu::TextureDescriptor {
             size: wgpu::Extent3d {

@@ -376,6 +376,7 @@ pub struct Renderer {
     post_uniforms: Uniforms<PostUniforms>,
     hipass_uniforms: Uniforms<HipassUniforms>,
     out_size: (u32, u32),
+    framebuffer_size: (u32, u32),
     nearest_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
     kawase_blur: Option<kawase::Blur>,
@@ -386,7 +387,8 @@ pub struct Renderer {
     hipass_pipeline: Option<pipelines::hipass::Pipeline>,
     msaa_factor: NonZeroU8,
     bloom_enabled: bool,
-    bloom_downsample: u8,
+    bloom_downscale: u8,
+    bloom_factor: f32,
     bloom_iterations: usize,
     bloom_radius: f32,
     bloom_texture: Option<wgpu::TextureView>,
@@ -640,10 +642,11 @@ struct Matrices {
     projection: cgmath::Matrix4<f32>,
 }
 
-const TONEMAPPING_MASK: u32 = 0b0001;
-const XYY_ACES_MASK: u32 = 0b0010;
-const CROSSTALK_MASK: u32 = 0b0100;
-const XYY_CROSSTALK_MASK: u32 = 0b1000;
+const TONEMAPPING_MASK: u32 = 0b0000_0001;
+const XYY_ACES_MASK: u32 = 0b0000_0010;
+const CROSSTALK_MASK: u32 = 0b0000_0100;
+const XYY_CROSSTALK_MASK: u32 = 0b0000_1000;
+const BLOOM_MASK: u32 = 0b0001_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
@@ -694,8 +697,21 @@ unsafe impl Zeroable for HipassUniforms {}
 pub const MAX_LIGHTS: usize = 128;
 const MINIMUM_ALIGNMENT: usize = 256;
 
+const DEFAULT_BLOOM_CUTOFF: f32 = 0.5;
+const DEFAULT_BLOOM_RADIUS: f32 = 1.0;
+const DEFAULT_BLOOM_INFLUENCE: f32 = 0.3;
+const DEFAULT_BLOOM_DOWNSCALE_FACTOR: f32 = 1.7;
+const DEFAULT_BLOOM_ITERATIONS: usize = 4;
+const DEFAULT_BLOOM_DOWNSCALE: u8 = 1;
+
 impl Renderer {
-    pub fn init(device: &wgpu::Device, out_size: (u32, u32), gamma: f32, intensity: f32) -> Self {
+    pub fn init(
+        device: &wgpu::Device,
+        out_size: (u32, u32),
+        framebuffer_size: (u32, u32),
+        gamma: f32,
+        intensity: f32,
+    ) -> Self {
         let cache = RenderCache::new(device);
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -745,15 +761,17 @@ impl Renderer {
 
         let post_uniforms = Uniforms::new(
             PostUniforms {
-                inv_resolution: 1. / cgmath::Vector2::new(out_size.0 as f32, out_size.1 as f32),
+                inv_resolution: 1.
+                    / cgmath::Vector2::new(framebuffer_size.0 as f32, framebuffer_size.1 as f32),
                 tonemapping_bitmap: TONEMAPPING_MASK
                     | CROSSTALK_MASK
+                    | BLOOM_MASK
                     | XYY_ACES_MASK
                     | XYY_CROSSTALK_MASK,
                 inv_crosstalk_amt: 1.0,
                 saturation: 1.1,
                 crosstalk_saturation: 2.,
-                bloom_influence: 0.2,
+                bloom_influence: DEFAULT_BLOOM_INFLUENCE,
             },
             device,
         );
@@ -761,7 +779,7 @@ impl Renderer {
         let hipass_uniforms = Uniforms::new(
             HipassUniforms {
                 inv_resolution: 1. / cgmath::Vector2::new(out_size.0 as f32, out_size.1 as f32),
-                cutoff: 1.0,
+                cutoff: DEFAULT_BLOOM_CUTOFF,
                 intensity,
             },
             device,
@@ -782,6 +800,7 @@ impl Renderer {
 
         Self {
             out_size,
+            framebuffer_size,
             matrices_buffer,
             fragment_uniforms,
             hipass_uniforms,
@@ -797,9 +816,10 @@ impl Renderer {
             cache,
             msaa_factor: NonZeroU8::new(1).unwrap(),
             bloom_enabled: true,
-            bloom_downsample: 1,
-            bloom_iterations: 4,
-            bloom_radius: 1.,
+            bloom_downscale: DEFAULT_BLOOM_DOWNSCALE,
+            bloom_iterations: DEFAULT_BLOOM_ITERATIONS,
+            bloom_factor: DEFAULT_BLOOM_DOWNSCALE_FACTOR,
+            bloom_radius: DEFAULT_BLOOM_RADIUS,
             bloom_texture: None,
             post_texture: None,
             post_verts,
@@ -812,10 +832,16 @@ impl Renderer {
             self.out_size = size;
             self.post_texture = None;
             self.depth_buffer = None;
-            self.post_uniforms.update(|uniforms| {
+            self.hipass_uniforms.update(|uniforms| {
                 uniforms.inv_resolution = 1. / cgmath::Vector2::new(size.0 as f32, size.1 as f32)
             });
-            self.hipass_uniforms.update(|uniforms| {
+        }
+    }
+
+    pub fn set_framebuffer_size(&mut self, size: (u32, u32)) {
+        if size != self.framebuffer_size {
+            self.framebuffer_size = size;
+            self.post_uniforms.update(|uniforms| {
                 uniforms.inv_resolution = 1. / cgmath::Vector2::new(size.0 as f32, size.1 as f32)
             });
         }
@@ -835,7 +861,17 @@ impl Renderer {
         }
     }
 
-    pub fn update_config(&mut self, f: impl FnOnce(&mut gui::Config) -> gui::ConfigDirty) {
+    pub fn set_tonemap_bitmap_bit(&mut self, mask: u32, enabled: bool) {
+        self.post_uniforms.update(|uniforms| {
+            uniforms.tonemapping_bitmap &= !mask;
+
+            if enabled {
+                uniforms.tonemapping_bitmap |= mask;
+            }
+        });
+    }
+
+    pub fn update_config(&mut self, f: impl FnOnce(&mut gui::Config)) {
         let mut config = gui::Config {
             gamma: self.gamma(),
             intensity: self.intensity(),
@@ -853,59 +889,51 @@ impl Renderer {
                 enabled: self.bloom_enabled,
                 radius: self.bloom_radius,
                 cutoff: self.hipass_uniforms.get().cutoff,
+                downscale: self.bloom_downscale as i32,
+                factor: self.bloom_factor,
+                iterations: self.bloom_iterations as i32,
                 influence: self.post_uniforms.get().bloom_influence,
             },
         };
 
-        let dirty = f(&mut config);
+        f(&mut config);
 
-        if dirty.gamma {
-            self.set_gamma(config.gamma);
+        self.set_gamma(config.gamma);
+        self.set_intensity(config.intensity);
+
+        self.bloom_enabled = config.bloom.enabled;
+        self.set_tonemap_bitmap_bit(BLOOM_MASK, config.bloom.enabled);
+
+        self.bloom_radius = config.bloom.radius;
+        if let Some(blur) = self.kawase_blur.as_mut() {
+            blur.set_radius(self.bloom_radius);
         }
 
-        if dirty.intensity {
-            self.set_intensity(config.intensity);
-        }
+        self.hipass_uniforms
+            .update(|uniforms| uniforms.cutoff = config.bloom.cutoff);
+        self.post_uniforms.update(|uniforms| {
+            uniforms.bloom_influence = config.bloom.influence;
+        });
 
-        if dirty.tonemapping {
-            self.set_crosstalk_amount(config.tonemapping.crosstalk_amt);
-            self.post_uniforms.update(|uniforms| {
-                let mut bitmap = 0;
+        self.set_crosstalk_amount(config.tonemapping.crosstalk_amt);
+        self.set_tonemap_bitmap_bit(TONEMAPPING_MASK, config.tonemapping.enabled);
+        self.set_tonemap_bitmap_bit(XYY_ACES_MASK, config.tonemapping.xyy_aces);
+        self.set_tonemap_bitmap_bit(CROSSTALK_MASK, config.tonemapping.crosstalk);
+        self.set_tonemap_bitmap_bit(XYY_CROSSTALK_MASK, config.tonemapping.xyy_crosstalk);
 
-                if config.tonemapping.enabled {
-                    bitmap |= TONEMAPPING_MASK;
-                }
+        self.post_uniforms.update(|uniforms| {
+            uniforms.saturation = config.tonemapping.saturation;
+            uniforms.crosstalk_saturation = config.tonemapping.crosstalk_saturation;
+        });
 
-                if config.tonemapping.xyy_aces {
-                    bitmap |= XYY_ACES_MASK;
-                }
-
-                if config.tonemapping.crosstalk {
-                    bitmap |= CROSSTALK_MASK;
-                }
-
-                if config.tonemapping.xyy_crosstalk {
-                    bitmap |= XYY_CROSSTALK_MASK;
-                }
-
-                uniforms.tonemapping_bitmap = bitmap;
-                uniforms.saturation = config.tonemapping.saturation;
-                uniforms.crosstalk_saturation = config.tonemapping.crosstalk_saturation;
-            });
-        }
-
-        if dirty.bloom {
-            self.bloom_enabled = config.bloom.enabled;
-
-            self.bloom_radius = config.bloom.radius;
-            if let Some(blur) = self.kawase_blur.as_mut() {
-                blur.set_radius(self.bloom_radius);
-            }
-
-            self.hipass_uniforms
-                .update(|uniforms| uniforms.cutoff = config.bloom.cutoff);
-            self.post_uniforms
-                .update(|uniforms| uniforms.bloom_influence = config.bloom.influence);
+        if config.bloom.factor != self.bloom_factor
+            || config.bloom.iterations as usize != self.bloom_iterations
+            || config.bloom.downscale as u8 != self.bloom_downscale
+        {
+            self.kawase_blur = None;
+            self.bloom_factor = config.bloom.factor;
+            self.bloom_iterations = config.bloom.iterations as usize;
+            self.bloom_downscale = config.bloom.downscale as u8;
         }
     }
 
@@ -1001,6 +1029,32 @@ impl Renderer {
                 self.msaa_factor.get() as u32,
             ));
         }
+
+        if self.kawase_blur.is_none() {
+            let blur = kawase::Blur::new(
+                device,
+                self.bloom_texture.as_ref().unwrap(),
+                &self.linear_sampler,
+                self.bloom_factor as f64,
+                self.bloom_iterations,
+                self.bloom_downscale,
+                self.bloom_radius,
+                self.out_size,
+            );
+
+            let MsaaTexture { diffuse_buffer, .. } = self.post_texture.as_ref().unwrap();
+
+            self.post_pipeline = Some(pipelines::postprocess::build(
+                device,
+                diffuse_buffer,
+                blur.output(),
+                &self.linear_sampler,
+                &self.post_uniforms.buffer(),
+                &self.fragment_uniforms.buffer(),
+            ));
+
+            self.kawase_blur = Some(blur);
+        }
     }
 
     fn update_msaa_buffer(&mut self, device: &wgpu::Device) {
@@ -1032,21 +1086,23 @@ impl Renderer {
 
             let MsaaTexture { diffuse_buffer, .. } = self.post_texture.as_ref().unwrap();
 
-            let bloom_texture = device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("bloom_buffer"),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: pipelines::postprocess::DIFFUSE_BUFFER_FORMAT,
-                    usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
-                })
-                .create_view(&Default::default());
+            self.bloom_texture = Some(
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("bloom_buffer"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: pipelines::postprocess::DIFFUSE_BUFFER_FORMAT,
+                        usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::OUTPUT_ATTACHMENT,
+                    })
+                    .create_view(&Default::default()),
+            );
 
             self.hipass_pipeline = Some(pipelines::hipass::build(
                 device,
@@ -1055,28 +1111,7 @@ impl Renderer {
                 &self.hipass_uniforms.buffer(),
             ));
 
-            let blur = kawase::Blur::new(
-                device,
-                &bloom_texture,
-                &self.linear_sampler,
-                self.bloom_iterations,
-                self.bloom_downsample,
-                self.bloom_radius,
-                self.out_size,
-            );
-
-            self.bloom_texture = Some(bloom_texture);
-
-            self.post_pipeline = Some(pipelines::postprocess::build(
-                device,
-                diffuse_buffer,
-                blur.output(),
-                &self.linear_sampler,
-                &self.post_uniforms.buffer(),
-                &self.fragment_uniforms.buffer(),
-            ));
-
-            self.kawase_blur = Some(blur);
+            self.kawase_blur = None;
         }
     }
 

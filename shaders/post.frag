@@ -20,12 +20,14 @@ layout(set = 0, binding = 4) uniform PostLocals {
     float a_BloomInfluence;
 };
 
-float luminance(vec3 color) {
-    const float RAmount = 0.2126;
-    const float GAmount = 0.7152;
-    const float BAmount = 0.0722;
+const mat3 ToXYZMatrix = mat3(
+    0.4124564, 0.3575761, 0.1804375,
+    0.2126729, 0.7151522, 0.0721750,
+    0.0193339, 0.1191920, 0.9503041
+);
 
-    return dot(color, vec3(RAmount, GAmount, BAmount));
+float luminance(vec3 color) {
+    return dot(color, ToXYZMatrix[1]);
 }
 
 vec3 applyLuminance(vec3 color, float lum) {
@@ -35,7 +37,7 @@ vec3 applyLuminance(vec3 color, float lum) {
     return color * scale;
 }
 
-float acesLum(float lum) {
+float aces(float lum) {
     const float a = 2.51;
     const float b = 0.03;
     const float c = 2.43;
@@ -48,7 +50,7 @@ float acesLum(float lum) {
 }
 
 vec3 acesLum(vec3 color) {
-    float lum = acesLum(luminance(color));
+    float lum = aces(luminance(color));
 
     return applyLuminance(color, lum);
 }
@@ -133,16 +135,26 @@ vec3 crosstalkLum(vec3 tonemapped) {
     return ratio * tonemappedMax;
 }
 
+const mat3 FromXYZMatrix = mat3(
+    3.2404542, -1.5371385, -0.4985314,
+    -0.9692660, 1.8760108, 0.0415560,
+    0.0556434, -0.2040259, 1.0572252
+);
+
 void main() {
-    vec3 diffuse = texture(sampler2D(t_Diffuse, s_Color), gl_FragCoord.xy * a_InvResolution).rgb * intensity;
-    vec3 bloom = texture(sampler2D(t_Bloom, s_Color), gl_FragCoord.xy * a_InvResolution).rgb;
-
-    diffuse = bloom * a_BloomInfluence + diffuse;
-
     bool tonemapping = (a_TonemappingBitmap & 0x1) != 0;
     bool xyySpaceAces = (a_TonemappingBitmap & 0x2) != 0;
     bool crosstalkEnabled = (a_TonemappingBitmap & 0x4) != 0;
     bool xyySpaceCrosstalk = (a_TonemappingBitmap & 0x8) != 0;
+    bool bloomEnabled = (a_TonemappingBitmap & 0x10) != 0;
+
+    vec3 diffuse = texture(sampler2D(t_Diffuse, s_Color), gl_FragCoord.xy * a_InvResolution).rgb * intensity;
+
+    if (bloomEnabled) {
+        vec3 bloom = FromXYZMatrix * texture(sampler2D(t_Bloom, s_Color), gl_FragCoord.xy * a_InvResolution).rgb;
+
+        diffuse = bloom * a_BloomInfluence + diffuse;
+    }
 
     vec3 final;
     if (tonemapping) {

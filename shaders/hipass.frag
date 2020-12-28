@@ -12,12 +12,14 @@ layout(set = 0, binding = 2) uniform Locals {
     float a_Intensity;
 };
 
-float luminance(vec3 color) {
-    const float RAmount = 0.2126;
-    const float GAmount = 0.7152;
-    const float BAmount = 0.0722;
+const mat3 ToXYZMatrix = mat3(
+    0.4124564,  0.3575761,  0.1804375,
+    0.2126729,  0.7151522,  0.0721750,
+    0.0193339,  0.1191920,  0.9503041
+);
 
-    return dot(color, vec3(RAmount, GAmount, BAmount));
+float luminance(vec3 color) {
+    return dot(color, ToXYZMatrix[1]);
 }
 
 vec3 applyLuminance(vec3 color, float lum) {
@@ -27,15 +29,12 @@ vec3 applyLuminance(vec3 color, float lum) {
     return color * scale;
 }
 
-vec3 ifLt(float a, float b, vec3 ifTrue, vec3 ifFalse) {
-    float lt = step(b, a);
-
-    return ifFalse * lt + ifTrue * (1 - lt);
-}
-
 void main() {
     vec2 uv = gl_FragCoord.xy * a_InvResolution;
     vec3 color = texture(sampler2D(t_Diffuse, s_Color), uv).rgb * a_Intensity;
 
-    outColor = vec4(clamp(color - applyLuminance(color, a_Cutoff), vec3(0), vec3(100)), 1);
+    outColor = vec4(
+        ToXYZMatrix * clamp(color - applyLuminance(color, a_Cutoff), vec3(0), vec3(100)),
+        1
+    );
 }

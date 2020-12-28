@@ -568,6 +568,8 @@ pub mod models {
             }),
             rasterization_state: Some(wgpu::RasterizationStateDescriptor {
                 front_face: super::WINDING_MODE,
+                // TODO: Models loaded have screwed-up winding orders.
+                //       I _think_ this is our fault but it happens with Assimp too so who knows.
                 cull_mode: wgpu::CullMode::None,
                 depth_bias: 0,
                 depth_bias_slope_scale: 0.0,

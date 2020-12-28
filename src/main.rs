@@ -17,9 +17,9 @@ use winit_async::{EventAsync as Event, EventLoopAsync};
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 mod assets;
-mod kawase;
 mod cache;
 mod gui;
+mod kawase;
 mod loader;
 mod render;
 
@@ -46,6 +46,8 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
     let (width, height) = DEFAULT_SIZE;
     window.set_inner_size(winit::dpi::LogicalSize { width, height });
     let size = window.inner_size();
+    let scale_factor = window.scale_factor();
+
     let instance = wgpu::Instance::new(wgpu::BackendBit::PRIMARY);
     let surface = unsafe { instance.create_surface(&window) };
     let adapter = instance
@@ -79,7 +81,17 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
         .await
         .unwrap();
 
-    let mut renderer = Renderer::init(&device, size.into(), 1.2, 1.0);
+    let mut renderer = Renderer::init(
+        &device,
+        (
+            (size.width as f64 / scale_factor) as _,
+            (size.height as f64 / scale_factor) as _,
+        ),
+        size.into(),
+        1.2,
+        1.0,
+    );
+
     let mut sky = None;
     let mut camera = None;
     let mut imgui = imgui::Context::create();
@@ -301,7 +313,11 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                     camera.set_aspect_ratio(sc_desc.width, sc_desc.height);
 
-                    renderer.set_size(size.into());
+                    renderer.set_size((
+                        (size.width as f64 / scale_factor) as _,
+                        (size.height as f64 / scale_factor) as _,
+                    ));
+                    renderer.set_framebuffer_size(size.into());
 
                     false
                 }

@@ -23,6 +23,7 @@ layout(binding = 4) uniform sampler s_Lightmap;
 layout(binding = 5) uniform Locals {
     vec2 _unused;
     float animationFrame;
+    float _unused2;
 };
 
 float ifLt(float a, float b, float ifTrue, float ifFalse) {
@@ -33,17 +34,17 @@ float ifLt(float a, float b, float ifTrue, float ifFalse) {
     return ifFalse * ge + ifTrue * (1 - ge);
 }
 
-float acesLum(float lum) {
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
+const mat3 FromXYZMatrix = mat3(
+    3.2404542, -1.5371385, -0.4985314,
+    -0.9692660, 1.8760108, 0.0415560,
+    0.0556434, -0.2040259, 1.0572252
+);
 
-    lum = (lum * (a * lum + b)) / (lum * (c * lum + d) + e);
-
-    return lum;
-}
+const mat3 ToXYZMatrix = mat3(
+    0.4124564,  0.3575761,  0.1804375,
+    0.2126729,  0.7151522,  0.0721750,
+    0.0193339,  0.1191920,  0.9503041
+);
 
 void main() {
     uint texCount;
@@ -76,35 +77,37 @@ void main() {
         )
     );
 
-    vec4 light = vec4(vec3(acesLum(v_Value)), 1.);
+    vec3 light;
+
+    light = vec3(log2(v_Value + 1));
 
     ivec2 lightmapSize = textureSize(sampler2D(t_Lightmap, s_Lightmap), 0);
 
     light += step(1, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         v_LightmapCoord / lightmapSize
-    );
+    ).rgb;
 
     light += step(2, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         (v_LightmapCoord + vec2(v_LightmapWidth, 0)) / lightmapSize
-    );
+    ).rgb;
 
     light += step(3, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 2) / lightmapSize
-    );
+    ).rgb;
 
     light += step(4, v_LightmapCount) * texture(
         sampler2D(t_Lightmap, s_Lightmap),
         (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 3) / lightmapSize
-    );
+    ).rgb;
 
     uint frame = uint(animationFrame);
 
-    outColor = texture(
+    outColor = 32 * texture(
         sampler2D(t_Diffuse,  s_Color),
         (offset + vec2(v_Tex.xy) + vec2(v_TexStride * (frame % texCount), 0)) /
             textureSize(sampler2D(t_Diffuse, s_Color), 0)
-    ) * light * 32;
+    ) * vec4(light, 1);
 }

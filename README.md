@@ -38,7 +38,12 @@ as the asset loading system and renderer were almost unusable. Admittedly since 
 project and not a library I would be completely able to throw out the Bevy renderer (and I would
 probably have to considering I've written my own that's tailored perfectly for what I need to render),
 but if the asset loader isn't usable that's more of an issue. It's something I'll have to tackle once
-animation is implemented.
+animation is implemented. Finally, I want to have _some_ kind of scriptable UI system, and I don't want
+it to be custom. Dear ImGui is one solution but I'm also considering using [Ultralight][ul] (which, for some
+reason, has Rust bindings on PsychonautWiki's GitHub account). Since one possible future goal is to
+get this running on the web, having a web-native UI framework might be pretty nice.
+
+[ul]: https://github.com/psychonautwiki/rust-ul
 
 My ultimate goal is to make a simple racing game or platformer using this engine - if I have the time,
 both. I don't really intend to release a full game using this, but I think it'd be good to try to make

@@ -26,10 +26,10 @@ pub struct Config {
     pub intensity: f32,
     pub tonemapping: Tonemapping,
     pub bloom: Bloom,
+    pub fxaa: bool,
 }
 
-#[must_use]
-pub fn draw(ui: &Ui<'_>, config: &mut Config, avg: f64) {
+pub fn fps(ui: &Ui<'_>, fps: f64) {
     let window = Window::new(im_str!("FPS Display"));
     window
         .title_bar(false)
@@ -40,9 +40,11 @@ pub fn draw(ui: &Ui<'_>, config: &mut Config, avg: f64) {
         .size([70., 10.], Condition::FirstUseEver)
         .position([0., 0.], Condition::FirstUseEver)
         .build(&ui, || {
-            ui.text(im_str!("FPS: {:.0}", 1. / avg));
+            ui.text(im_str!("FPS: {:.0}", 1. / fps));
         });
+}
 
+pub fn config(ui: &Ui<'_>, config: &mut Config) {
     let window = Window::new(im_str!("Config"));
     window
         .size([300.0, 400.0], Condition::FirstUseEver)
@@ -51,6 +53,7 @@ pub fn draw(ui: &Ui<'_>, config: &mut Config, avg: f64) {
             ui.input_float(im_str!("Gamma"), &mut config.gamma).build();
             ui.input_float(im_str!("Intensity"), &mut config.intensity)
                 .build();
+            ui.checkbox(im_str!("FXAA"), &mut config.fxaa);
 
             if imgui::CollapsingHeader::new(im_str!("ACES Tonemapping"))
                 .default_open(true)

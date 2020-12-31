@@ -83,25 +83,28 @@ void main() {
 
     ivec2 lightmapSize = textureSize(sampler2D(t_Lightmap, s_Lightmap), 0);
 
-    light += step(1, v_LightmapCount) * texture(
-        sampler2D(t_Lightmap, s_Lightmap),
-        v_LightmapCoord / lightmapSize
-    ).rgb;
-
-    light += step(2, v_LightmapCount) * texture(
-        sampler2D(t_Lightmap, s_Lightmap),
-        (v_LightmapCoord + vec2(v_LightmapWidth, 0)) / lightmapSize
-    ).rgb;
-
-    light += step(3, v_LightmapCount) * texture(
-        sampler2D(t_Lightmap, s_Lightmap),
-        (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 2) / lightmapSize
-    ).rgb;
-
-    light += step(4, v_LightmapCount) * texture(
-        sampler2D(t_Lightmap, s_Lightmap),
-        (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 3) / lightmapSize
-    ).rgb;
+    switch (v_LightmapCount) {
+    case 4:
+        light += step(4, v_LightmapCount) * texture(
+            sampler2D(t_Lightmap, s_Lightmap),
+            (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 3) / lightmapSize
+        ).rgb;
+    case 3:
+        light += step(3, v_LightmapCount) * texture(
+            sampler2D(t_Lightmap, s_Lightmap),
+            (v_LightmapCoord + vec2(v_LightmapWidth, 0) * 2) / lightmapSize
+        ).rgb;
+    case 2:
+        light += step(2, v_LightmapCount) * texture(
+            sampler2D(t_Lightmap, s_Lightmap),
+            (v_LightmapCoord + vec2(v_LightmapWidth, 0)) / lightmapSize
+        ).rgb;
+    case 1:
+        light += step(1, v_LightmapCount) * texture(
+            sampler2D(t_Lightmap, s_Lightmap),
+            v_LightmapCoord / lightmapSize
+        ).rgb;
+    }
 
     uint frame = uint(animationFrame);
 

@@ -2,7 +2,8 @@
 #pragma optimize(on)
 #pragma shader_stage(fragment)
 
-layout(location = 0) out vec4 outColor;
+layout(location = 0) in vec2 i_UV;
+layout(location = 0) out vec4 o_Color;
 
 layout(set = 0, binding = 0) uniform texture2D t_Diffuse;
 layout(set = 0, binding = 1) uniform texture2D t_Bloom;
@@ -12,7 +13,6 @@ layout(set = 0, binding = 3) uniform Locals {
     float intensity;
 };
 layout(set = 0, binding = 4) uniform PostLocals {
-    vec2 a_InvResolution;
     uint a_TonemappingBitmap;
     float a_InvCrosstalkAmt;
     float a_Saturation;
@@ -148,10 +148,11 @@ void main() {
     bool xyySpaceCrosstalk = (a_TonemappingBitmap & 0x8) != 0;
     bool bloomEnabled = (a_TonemappingBitmap & 0x10) != 0;
 
-    vec3 diffuse = texture(sampler2D(t_Diffuse, s_Color), gl_FragCoord.xy * a_InvResolution).rgb * intensity;
+    vec3 diffuse = texture(sampler2D(t_Diffuse, s_Color), i_UV).rgb * intensity;
+    vec2 size = textureSize(sampler2D(t_Diffuse, s_Color), 0);
 
     if (bloomEnabled) {
-        vec3 bloom = FromXYZMatrix * texture(sampler2D(t_Bloom, s_Color), gl_FragCoord.xy * a_InvResolution).rgb;
+        vec3 bloom = FromXYZMatrix * texture(sampler2D(t_Bloom, s_Color), i_UV).rgb;
 
         diffuse = bloom * a_BloomInfluence + diffuse;
     }
@@ -174,5 +175,5 @@ void main() {
         final = diffuse;
     }
 
-    outColor = vec4(pow(final, vec3(invGamma)), 1.0);
+    o_Color = vec4(pow(final, vec3(invGamma)), luminance(final));
 }

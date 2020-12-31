@@ -202,9 +202,9 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut sc_desc = wgpu::SwapChainDescriptor {
         usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
-        format: wgpu::TextureFormat::Bgra8UnormSrgb,
-        width: size.width,
-        height: size.height,
+        format: render::pipelines::SWAPCHAIN_FORMAT,
+        width: (size.width as f64 / scale_factor) as _,
+        height: (size.height as f64 / scale_factor) as _,
         present_mode: wgpu::PresentMode::Mailbox,
     };
 
@@ -324,7 +324,6 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => break 'main,
-
                     WindowEvent::KeyboardInput {
                         input:
                             event::KeyboardInput {
@@ -335,8 +334,15 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                         ..
                     } => {
                         locked_mouse = false;
-                        window.set_cursor_grab(false).unwrap();
-                        window.set_cursor_visible(true);
+
+                        true
+                    }
+                    &WindowEvent::MouseInput {
+                        state: event::ElementState::Pressed,
+                        button: event::MouseButton::Left,
+                        ..
+                    } if !debug_gui => {
+                        locked_mouse = true;
 
                         true
                     }
@@ -353,16 +359,10 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                             debug_gui = !debug_gui;
                             locked_mouse &= !debug_gui;
 
-                            window.set_cursor_visible(!locked_mouse);
-                            window.set_cursor_grab(locked_mouse).unwrap();
-
                             true
                         }
                         event::VirtualKeyCode::Space if !debug_gui => {
                             locked_mouse = !locked_mouse;
-
-                            window.set_cursor_visible(!locked_mouse);
-                            window.set_cursor_grab(locked_mouse).unwrap();
 
                             true
                         }
@@ -400,6 +400,9 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                 }
                 _ => false,
             };
+
+            window.set_cursor_visible(!locked_mouse);
+            window.set_cursor_grab(locked_mouse).unwrap();
 
             if !captured {
                 if let Some(event) = to_normal_event(event) {
@@ -452,7 +455,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                         },
                     );
 
-                    if debug_gui {
+                    {
                         let mut imgui_pass =
                             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
@@ -473,13 +476,14 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                             .expect("Failed to prepare frame");
                         let ui = imgui.frame();
 
-                        renderer.update_config(|config| {
-                            gui::draw(
-                                &ui,
-                                config,
-                                frametimes.iter().copied().sum::<f64>() / frametimes.len() as f64,
-                            )
-                        });
+                        gui::fps(
+                            &ui,
+                            frametimes.iter().copied().sum::<f64>() / frametimes.len() as f64,
+                        );
+
+                        if debug_gui {
+                            renderer.update_config(|config| gui::config(&ui, config));
+                        }
 
                         if last_cursor != Some(ui.mouse_cursor()) {
                             last_cursor = Some(ui.mouse_cursor());

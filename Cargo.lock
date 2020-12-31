@@ -848,6 +848,7 @@ dependencies = [
  "anyhow",
  "arraydeque",
  "async-trait",
+ "bitflags",
  "bsp",
  "bytemuck",
  "cgmath",

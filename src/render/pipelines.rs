@@ -34,6 +34,7 @@ impl BindId {
 
 pub const WINDING_MODE: wgpu::FrontFace = wgpu::FrontFace::Ccw;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub const SWAPCHAIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 /// The world pipeline (unlike the skybox pipeline) does proper depth testing, although doesn't
 /// handle transparency right now. It takes a lightmap atlas and a diffuse texture atlas, and
@@ -787,7 +788,7 @@ pub mod postprocess {
             }),
             primitive_topology: wgpu::PrimitiveTopology::TriangleList,
             color_states: &[wgpu::ColorStateDescriptor {
-                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                format: super::SWAPCHAIN_FORMAT,
                 color_blend: wgpu::BlendDescriptor::REPLACE,
                 alpha_blend: wgpu::BlendDescriptor::REPLACE,
                 write_mask: wgpu::ColorWrite::ALL,
@@ -969,6 +970,247 @@ pub mod hipass {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Buffer(post_uniforms.slice(..)),
+                },
+            ],
+        });
+
+        Pipeline {
+            bind_group,
+            pipeline,
+        }
+    }
+}
+
+/// FXAA pipeline, the final step. Needs the input to have luminance in the alpha channel.
+pub mod fxaa {
+    use super::{BindId, ShaderModuleSourceExt as _};
+    use lazy_static::lazy_static;
+
+    pub use super::Pipeline;
+    use crate::render::PostVertex;
+    use memoffset::offset_of;
+    use std::mem;
+
+    lazy_static! {
+        static ref VERTEX_SHADER: wgpu::ShaderModuleSource<'static> =
+            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/post.vert.spv"));
+        static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
+            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/fxaa.frag.spv"));
+    }
+
+    pub fn build(
+        device: &wgpu::Device,
+        diffuse_tex: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> Pipeline {
+        let vs_module = device.create_shader_module(VERTEX_SHADER.as_ref());
+        let fs_module = device.create_shader_module(FRAGMENT_SHADER.as_ref());
+
+        let mut ids = BindId::default();
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bindgrouplayout_fxaa"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: ids.next(),
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::SampledTexture {
+                        multisampled: false,
+                        component_type: wgpu::TextureComponentType::Float,
+                        dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: ids.next(),
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler { comparison: false },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex_stage: wgpu::ProgrammableStageDescriptor {
+                module: &vs_module,
+                entry_point: "main",
+            },
+            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+                module: &fs_module,
+                entry_point: "main",
+            }),
+            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
+                front_face: super::WINDING_MODE,
+                cull_mode: wgpu::CullMode::Back,
+                depth_bias: 0,
+                depth_bias_slope_scale: 0.0,
+                depth_bias_clamp: 0.0,
+                clamp_depth: false,
+            }),
+            primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: super::SWAPCHAIN_FORMAT,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
+            depth_stencil_state: None,
+            vertex_state: wgpu::VertexStateDescriptor {
+                index_format: wgpu::IndexFormat::Uint16,
+                vertex_buffers: &[wgpu::VertexBufferDescriptor {
+                    stride: mem::size_of::<PostVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::InputStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttributeDescriptor {
+                        format: wgpu::VertexFormat::Float2,
+                        offset: offset_of!(PostVertex, pos) as u64,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            sample_count: 1,
+            sample_mask: !0,
+            alpha_to_coverage_enabled: false,
+        });
+
+        let mut ids = BindId::default();
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bindgroup_fxaa"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::TextureView(diffuse_tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        Pipeline {
+            bind_group,
+            pipeline,
+        }
+    }
+}
+
+pub mod passthrough {
+    use super::{BindId, ShaderModuleSourceExt as _};
+    use lazy_static::lazy_static;
+
+    pub use super::Pipeline;
+    use crate::render::PostVertex;
+    use memoffset::offset_of;
+    use std::mem;
+
+    lazy_static! {
+        static ref VERTEX_SHADER: wgpu::ShaderModuleSource<'static> =
+            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/post.vert.spv"));
+        static ref FRAGMENT_SHADER: wgpu::ShaderModuleSource<'static> =
+            wgpu::include_spirv!(concat!(env!("OUT_DIR"), "/passthrough.frag.spv"));
+    }
+
+    pub fn build(
+        device: &wgpu::Device,
+        diffuse_tex: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> Pipeline {
+        let vs_module = device.create_shader_module(VERTEX_SHADER.as_ref());
+        let fs_module = device.create_shader_module(FRAGMENT_SHADER.as_ref());
+
+        let mut ids = BindId::default();
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bindgrouplayout_fxaa"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: ids.next(),
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::SampledTexture {
+                        multisampled: false,
+                        component_type: wgpu::TextureComponentType::Float,
+                        dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: ids.next(),
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler { comparison: false },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex_stage: wgpu::ProgrammableStageDescriptor {
+                module: &vs_module,
+                entry_point: "main",
+            },
+            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+                module: &fs_module,
+                entry_point: "main",
+            }),
+            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
+                front_face: super::WINDING_MODE,
+                cull_mode: wgpu::CullMode::Back,
+                depth_bias: 0,
+                depth_bias_slope_scale: 0.0,
+                depth_bias_clamp: 0.0,
+                clamp_depth: false,
+            }),
+            primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: super::SWAPCHAIN_FORMAT,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
+            depth_stencil_state: None,
+            vertex_state: wgpu::VertexStateDescriptor {
+                index_format: wgpu::IndexFormat::Uint16,
+                vertex_buffers: &[wgpu::VertexBufferDescriptor {
+                    stride: mem::size_of::<PostVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::InputStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttributeDescriptor {
+                        format: wgpu::VertexFormat::Float2,
+                        offset: offset_of!(PostVertex, pos) as u64,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            sample_count: 1,
+            sample_mask: !0,
+            alpha_to_coverage_enabled: false,
+        });
+
+        let mut ids = BindId::default();
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bindgroup_fxaa"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::TextureView(diffuse_tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: ids.next(),
+                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
         });

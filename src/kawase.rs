@@ -57,28 +57,17 @@ mod pipelines {
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bindgrouplayout_kawase_uniforms"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::SampledTexture {
-                            multisampled: false,
-                            component_type: wgpu::TextureComponentType::Float,
-                            dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
+                label: Some("bindgrouplayout_kawase_tex_uniforms"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::SampledTexture {
+                        multisampled: false,
+                        component_type: wgpu::TextureComponentType::Float,
+                        dimension: wgpu::TextureViewDimension::D2,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::UniformBuffer {
-                            dynamic: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
+                    count: None,
+                }],
             });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -235,11 +224,6 @@ impl Blur {
 
         let mut buffers = Vec::with_capacity(iterations);
 
-        struct InterimTarget {
-            texture: wgpu::Texture,
-            uniforms: wgpu::Buffer,
-        }
-
         for i in 0..iterations {
             let downsample_power = initial_downsample as usize + i;
             let downsample_amount = downsample_factor.powi(downsample_power as i32);
@@ -263,16 +247,7 @@ impl Blur {
                 label: Some("kawase_intermediate_buffer"),
             });
 
-            let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&[
-                    (resolution.0 as f32).recip(),
-                    (resolution.1 as f32).recip(),
-                ]),
-                usage: wgpu::BufferUsage::UNIFORM,
-            });
-
-            buffers.push(InterimTarget { texture, uniforms });
+            buffers.push(texture);
         }
 
         let mut prev_owned;
@@ -284,23 +259,17 @@ impl Blur {
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("bindgroup_kawase_tex"),
                 layout: &pipeline.texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&prev),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(target.uniforms.slice(..)),
-                    },
-                ],
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&prev),
+                }],
             });
 
-            prev_owned = target.texture.create_view(&Default::default());
+            prev_owned = target.create_view(&Default::default());
             prev = &prev_owned;
 
             targets.push(Target {
-                view: target.texture.create_view(&Default::default()),
+                view: target.create_view(&Default::default()),
                 bind_group,
             });
         }
@@ -327,54 +296,33 @@ impl Blur {
 
         if let Some(mut prev) = buffers
             .last()
-            .map(|target| target.texture.create_view(&Default::default()))
+            .map(|target| target.create_view(&Default::default()))
         {
             for target in buffers.iter().rev().skip(1) {
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("bindgroup_kawase_tex"),
                     layout: &pipeline.texture_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&prev),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Buffer(target.uniforms.slice(..)),
-                        },
-                    ],
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&prev),
+                    }],
                 });
 
-                prev = target.texture.create_view(&Default::default());
+                prev = target.create_view(&Default::default());
 
                 targets.push(Target {
-                    view: target.texture.create_view(&Default::default()),
+                    view: target.create_view(&Default::default()),
                     bind_group,
                 });
             }
 
-            let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&[
-                    (output_size.0 as f32).recip(),
-                    (output_size.1 as f32).recip(),
-                ]),
-                usage: wgpu::BufferUsage::UNIFORM,
-            });
-
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("bindgroup_kawase_tex"),
                 layout: &pipeline.texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&prev),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(uniforms.slice(..)),
-                    },
-                ],
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&prev),
+                }],
             });
 
             targets.push(Target {

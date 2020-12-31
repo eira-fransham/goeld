@@ -11,6 +11,7 @@ arraydeque = "0.4"
 anyhow = "1"
 async-trait = "0.1"
 bsp = { path = "./bsp" }
+bitflags = "1"
 bytemuck = "1"
 cgmath = "0.17"
 collision = "0.20"
@@ -40,3 +41,6 @@ default = ["jemallocator"]
 
 [workspace]
 members = ["bsp", "goldsrc-mdl", "goldsrc-format-common"]
+
+[profile.release]
+lto = "thin"

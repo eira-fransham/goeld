@@ -21,7 +21,6 @@ struct ClusterMeta {
 
 pub struct World {
     vis: bsp::Vis,
-    last_cluster: Option<u16>,
     tex_vert_offset: u64,
     world_vert_offset: u64,
     // Key is `(model, cluster)`
@@ -348,7 +347,6 @@ impl LoadAsset for BspAsset {
             world_vert_offset,
             cluster_meta,
             model_ranges,
-            last_cluster: None,
         })
     }
 }
@@ -405,9 +403,10 @@ mod hack {
 
     #[inline]
     pub fn impl_trait_hack(vis: &bsp::Vis, cluster: Option<u16>) -> ImplTraitHack<'_> {
-        cluster
-            .into_iter()
-            .flat_map(move |cluster| vis.visible_clusters(cluster, ..))
+        match cluster {
+            Some(cluster) => itertools::Either::Left(vis.visible_clusters(cluster, ..)),
+            None => itertools::Either::Right(vis.clusters()),
+        }
     }
 }
 
@@ -428,10 +427,7 @@ impl<'a> Render for &'a mut World {
         let cluster = vis
             .model(0)
             .unwrap()
-            .cluster_at::<bsp::XEastYSouthZUp, _>(pos)
-            .or(self.last_cluster);
-
-        self.last_cluster = cluster;
+            .cluster_at::<bsp::XEastYSouthZUp, _>(pos);
 
         // TODO: We should separate these somewhat so we have a way to move models around
         let model_start_index = 1;

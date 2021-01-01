@@ -175,5 +175,6 @@ void main() {
         final = diffuse;
     }
 
+    // TODO: Is it better to run the gamma pass on luminance (after FXAA)?
     o_Color = vec4(pow(final, vec3(invGamma)), luminance(final));
 }

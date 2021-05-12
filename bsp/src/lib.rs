@@ -185,9 +185,11 @@ impl BspFormat for Quake2 {
 pub enum Goldsrc {}
 
 impl BspFormat for Goldsrc {
+    // GoldSrc BSPs don't have a magic number at all
+    type Magic = ();
+
     const VERSION: u32 = 0x1e;
 
-    type Magic = ();
     type Directories = GoldsrcDirectories;
     type Texture = GoldsrcTexture;
     type Miptexes = Box<[GoldsrcMiptex]>;

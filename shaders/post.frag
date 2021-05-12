@@ -148,7 +148,8 @@ void main() {
     bool xyySpaceCrosstalk = (a_TonemappingBitmap & 0x8) != 0;
     bool bloomEnabled = (a_TonemappingBitmap & 0x10) != 0;
 
-    vec3 diffuse = texture(sampler2D(t_Diffuse, s_Color), i_UV).rgb * intensity;
+    // We limit the minimum possible black value so that blacks can still bleach at high light levels
+    vec3 diffuse = max(texture(sampler2D(t_Diffuse, s_Color), i_UV).rgb * intensity, vec3(0.01));
     vec2 size = textureSize(sampler2D(t_Diffuse, s_Color), 0);
 
     if (bloomEnabled) {

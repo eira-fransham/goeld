@@ -11,7 +11,7 @@ use collision::{Aabb3, Frustum, Relation};
 use fnv::FnvHashMap as HashMap;
 use std::{convert::TryFrom, ops::Range};
 
-pub struct BspAsset(pub bsp::Bsp);
+pub struct BspAsset<F: bsp::BspFormat = bsp::Quake2>(pub bsp::Bsp<F>);
 
 #[derive(Debug, Clone, PartialEq)]
 struct ClusterMeta {
@@ -177,6 +177,7 @@ where
     )
 }
 
+// impl<F: bsp::BspFormat> LoadAsset for BspAsset<F> {
 impl LoadAsset for BspAsset {
     type Asset = World;
 

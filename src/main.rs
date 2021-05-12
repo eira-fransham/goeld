@@ -1,4 +1,9 @@
-#![feature(osstring_ascii, const_generics, type_alias_impl_trait, async_closure)]
+#![feature(
+    osstring_ascii,
+    const_generics,
+    min_type_alias_impl_trait,
+    async_closure
+)]
 
 use bsp::Bsp;
 

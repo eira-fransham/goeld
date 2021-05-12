@@ -108,9 +108,11 @@ void main() {
 
     uint frame = uint(animationFrame);
 
-    outColor = 32 * texture(
+    outColor = 32 * textureGrad(
         sampler2D(t_Diffuse,  s_Color),
         (offset + vec2(v_Tex.xy) + vec2(v_TexStride * (frame % texCount), 0)) /
-            textureSize(sampler2D(t_Diffuse, s_Color), 0)
+            textureSize(sampler2D(t_Diffuse, s_Color), 0),
+        dFdx(offset),
+        dFdy(offset)
     ) * vec4(light, 1);
 }

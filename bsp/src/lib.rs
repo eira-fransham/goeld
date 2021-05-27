@@ -8,6 +8,7 @@ extern crate test;
 use arrayvec::ArrayString;
 use bitflags::bitflags;
 use bv::BitVec;
+use fnv::FnvHashSet as HashSet;
 pub use goldsrc_format_common::{
     parseable, CoordSystem, ElementSize, QVec, SimpleParse, XEastYDownZSouth, XEastYNorthZUp,
     XEastYSouthZUp, V3,
@@ -17,7 +18,7 @@ use std::{
     fmt,
     io::{self, ErrorKind, Read, Seek, SeekFrom},
     iter::{self, FromIterator},
-    ops::Deref,
+    ops::{Deref, Range},
 };
 
 #[cfg(not(debug_assertions))]
@@ -136,10 +137,13 @@ pub trait BspTexture<B: BspFormat + ?Sized>: Sized {
     fn name<'a>(&'a self, bsp: &'a Bsp<B>) -> &'a str;
     fn data(&self, bsp: &Bsp<B>) -> Option<image::ImageBuffer<Self::Format, &[u8]>>;
     fn offsets(&self) -> &TextureOffsets;
+    fn flags(&self) -> SurfaceFlags;
 }
 
 pub trait BspLeaf {
     fn cluster(&self) -> i16;
+    fn contents(&self) -> ContentFlags;
+    fn leaf_brushes(&self) -> Range<u16>;
 }
 
 pub trait BspModel {
@@ -533,6 +537,16 @@ bitflags! {
     }
 }
 
+impl ContentFlags {
+    pub fn mask_solid() -> Self {
+        Self::SOLID | Self::WINDOW
+    }
+
+    pub fn mask_playersolid() -> Self {
+        Self::SOLID | Self::PLAYERCLIP | Self::WINDOW | Self::MONSTER
+    }
+}
+
 impl ElementSize for ContentFlags {
     const SIZE: usize = u32::SIZE;
 }
@@ -732,6 +746,10 @@ impl BspTexture<Quake2> for Q2Texture {
     fn offsets(&self) -> &TextureOffsets {
         &self.offsets
     }
+
+    fn flags(&self) -> SurfaceFlags {
+        self.flags
+    }
 }
 
 impl BspTexture<Goldsrc> for GoldsrcTexture {
@@ -748,6 +766,10 @@ impl BspTexture<Goldsrc> for GoldsrcTexture {
     fn offsets(&self) -> &TextureOffsets {
         &self.offsets
     }
+
+    fn flags(&self) -> SurfaceFlags {
+        self.flags
+    }
 }
 parseable! {
     #[derive(Default, Debug, Clone, PartialEq)]
@@ -756,6 +778,14 @@ parseable! {
         pub dist: f32,
         pub type_: u32,
     }
+}
+
+impl Plane {
+    const DEFAULT: Self = Plane {
+        normal: QVec::ORIGIN,
+        dist: 0.,
+        type_: 0,
+    };
 }
 
 parseable! {
@@ -791,6 +821,14 @@ impl BspLeaf for Q2Leaf {
     fn cluster(&self) -> i16 {
         self.cluster
     }
+
+    fn contents(&self) -> ContentFlags {
+        self.contents
+    }
+
+    fn leaf_brushes(&self) -> Range<u16> {
+        self.leaf_brush..self.leaf_brush + self.num_leaf_brushes
+    }
 }
 
 parseable! {
@@ -809,6 +847,14 @@ parseable! {
 
 impl BspLeaf for GoldsrcLeaf {
     fn cluster(&self) -> i16 {
+        unimplemented!()
+    }
+
+    fn contents(&self) -> ContentFlags {
+        self.contents
+    }
+
+    fn leaf_brushes(&self) -> Range<u16> {
         unimplemented!()
     }
 }
@@ -1316,6 +1362,65 @@ impl<F: BspFormat> AsRef<[Plane]> for Vis<F> {
     }
 }
 
+/// Intermediate data for an in-progress trace
+#[derive(Debug)]
+pub struct TraceInProgress {
+    /// The fraction of the input ray that the start point represents
+    start_frac: f32,
+    /// The fraction of the input ray that the end point represents
+    end_frac: f32,
+    /// The AABB mins of the input ray
+    mins: QVec,
+    /// The AABB maxs of the input ray
+    maxs: QVec,
+    /// The size of the AABB for the input ray
+    extents: QVec,
+    /// The current start point
+    start: QVec,
+    /// The current end point
+    end: QVec,
+}
+
+/// The result of a `cast_ray` operation.
+#[derive(Debug)]
+pub struct Trace {
+    /// If true, plane is invalid
+    pub all_solid: bool,
+    /// If true, the start point is in a solid area
+    pub start_solid: bool,
+    /// The fraction of the start->end vector at which
+    /// the impact point lies (1.0 = no hit).
+    pub fraction: f32,
+    /// Trace start position
+    pub start: QVec,
+    /// Final position
+    pub end: QVec,
+    /// Surface normal at impact
+    pub plane: Plane,
+    /// Surface flags at point of impact
+    pub surface_flags: SurfaceFlags,
+    /// The flags of the contents of the brush at impact point
+    pub contents: ContentFlags,
+}
+
+impl Trace {
+    pub fn hit(&self) -> bool {
+        self.fraction < 1.
+    }
+}
+
+pub struct TraceOptions {
+    pub flags: ContentFlags,
+}
+
+impl Default for TraceOptions {
+    fn default() -> Self {
+        Self {
+            flags: ContentFlags::SOLID | ContentFlags::WINDOW,
+        }
+    }
+}
+
 impl<F: BspFormat> Vis<F> {
     #[inline]
     pub fn node(&self, n: usize) -> Option<Handle<'_, Self, Node>> {
@@ -1369,96 +1474,6 @@ impl<F: BspFormat> Vis<F> {
         C: CoordSystem,
     {
         self.leaf_index_at(root, point).and_then(|i| self.leaf(i))
-    }
-
-    fn cast_ray_between(
-        &self,
-        root: Handle<'_, Self, Node>,
-        start: QVec,
-        end: QVec,
-    ) -> Option<QVec> {
-        let plane = root.plane()?;
-        let start_dot = if plane.type_ < 3 {
-            start.0[plane.type_ as usize] - plane.dist
-        } else {
-            start.dot(&plane.normal) - plane.dist
-        };
-        let end_dot = if plane.type_ < 3 {
-            end.0[plane.type_ as usize] - plane.dist
-        } else {
-            end.dot(&plane.normal) - plane.dist
-        };
-
-        let [front, back] = root.children;
-
-        if start_dot > 0. && end_dot > 0. {
-            let child: i32 = todo!();
-            let child = if front < 0 {
-                todo!()
-            } else {
-                self.node(child as usize)?
-            };
-
-            self.cast_ray_between(child, start, end)
-        } else if start_dot < 0. && end_dot < 0. {
-            let child: i32 = todo!();
-            let child = if back < 0 {
-                todo!()
-            } else {
-                self.node(child as usize)?
-            };
-
-            self.cast_ray_between(child, start, end)
-        } else {
-            todo!()
-        }
-    }
-
-    pub fn cast_ray<C, P: Into<V3<C>>, N: Into<V3<C>>>(
-        &self,
-        root: Handle<'_, Self, Node>,
-        point: P,
-        norm: N,
-    ) -> Option<QVec>
-    where
-        C: CoordSystem,
-    {
-        let point = C::into_qvec(point.into());
-        let norm = C::into_qvec(norm.into());
-
-        let plane = root.plane()?;
-        let dot = if plane.type_ < 3 {
-            point.0[plane.type_ as usize] - plane.dist
-        } else {
-            point.dot(&plane.normal) - plane.dist
-        };
-        let norm_dot = if plane.type_ < 3 {
-            norm.0[plane.type_ as usize] - plane.dist
-        } else {
-            norm.dot(&plane.normal) - plane.dist
-        };
-
-        let [front, back] = root.children;
-
-        if dot < 0. && norm_dot < 0. || dot > 0. && norm_dot > 0. {
-            let child = if norm_dot > 0. { front } else { back };
-            let child = if child < 0 {
-                todo!()
-            } else {
-                self.node(child as usize)?
-            };
-
-            self.cast_ray(child, point, norm)
-        } else {
-            let child = if norm_dot < 0. { front } else { back };
-            let child = if child < 0 {
-                todo!()
-            } else {
-                self.node(child as usize)?
-            };
-
-            self.cast_ray_between(child, point, norm * dot)
-        }
     }
 
     #[inline]
@@ -1714,6 +1729,8 @@ impl<F: BspFormat> AsRef<[Plane]> for Bsp<F> {
     }
 }
 
+const DIST_EPSILON: f32 = 1. / 32.;
+
 impl<F: BspFormat> Bsp<F> {
     #[inline]
     pub fn read<R: Read + Seek>(mut reader: R) -> io::Result<Self> {
@@ -1857,6 +1874,352 @@ impl<F: BspFormat> Bsp<F> {
             bsp: self,
             data: leaf,
         })
+    }
+
+    fn clip_box_to_brush(&self, state: &TraceInProgress, trace: &mut Trace, brush: &Brush) {
+        if brush.num_brush_sides == 0 {
+            return;
+        }
+
+        let mut enter_frac = -1f32;
+        let mut leave_frac = 1f32;
+        let mut end_in_nonsolid = false;
+        let mut start_in_nonsolid = false;
+        let mut clip_plane = None;
+        let mut lead_side = None;
+
+        for i in brush.brush_side..brush.brush_side + brush.num_brush_sides {
+            let side = &self.brush_sides[i as usize];
+            let plane = &self.vis.planes[side.plane as usize];
+            let dist = {
+                let mut ofs = [0., 0., 0.];
+
+                for (((o, min), max), norm) in ofs
+                    .iter_mut()
+                    .zip(&state.maxs.0)
+                    .zip(&state.mins.0)
+                    .zip(&plane.normal.0)
+                {
+                    *o = if *norm < 0. { *min } else { *max }
+                }
+
+                let ofs = QVec::from(ofs);
+
+                plane.dist - ofs.dot(&plane.normal)
+            };
+
+            let (start_dot, end_dot) = if plane.type_ < 3 {
+                (
+                    trace.start.0[plane.type_ as usize] - dist,
+                    trace.end.0[plane.type_ as usize] - dist,
+                )
+            } else {
+                (
+                    trace.start.dot(&plane.normal) - dist,
+                    trace.end.dot(&plane.normal) - dist,
+                )
+            };
+
+            // Completely in front of face
+            if start_dot > 0. && end_dot >= start_dot {
+                return;
+            }
+
+            if start_dot <= 0. && end_dot <= 0. {
+                continue;
+            }
+
+            end_in_nonsolid |= end_dot > 0.;
+            start_in_nonsolid |= start_dot > 0.;
+
+            if start_dot > end_dot {
+                let f = (start_dot - DIST_EPSILON) / (start_dot - end_dot);
+
+                if f > enter_frac {
+                    enter_frac = f;
+                    lead_side = Some(side);
+                    clip_plane = Some(plane);
+                }
+            } else {
+                let f = (start_dot + DIST_EPSILON) / (start_dot - end_dot);
+
+                if f < leave_frac {
+                    leave_frac = f;
+                }
+            }
+        }
+
+        if !start_in_nonsolid {
+            trace.start_solid = true;
+
+            if !end_in_nonsolid {
+                trace.all_solid = true;
+            }
+
+            return;
+        }
+
+        if enter_frac < leave_frac && enter_frac > -1. && enter_frac < trace.fraction {
+            enter_frac = enter_frac.max(0.);
+
+            *trace = Trace {
+                fraction: enter_frac,
+                plane: clip_plane.unwrap().clone(),
+                contents: brush.contents,
+                surface_flags: lead_side
+                    .and_then(|s| s.texture.try_into().ok())
+                    .and_then(|t| self.textures().nth(t))
+                    .map(|t| t.flags())
+                    .unwrap_or_default(),
+                ..*trace
+            };
+        }
+    }
+
+    fn trace_leaf(
+        &self,
+        leaf: Handle<'_, Self, F::Leaf>,
+        state: &TraceInProgress,
+        checked_brushes: &mut HashSet<u16>,
+        trace: &mut Trace,
+        options: &TraceOptions,
+    ) {
+        if (leaf.contents() & options.flags).is_empty() {
+            return;
+        }
+
+        for leaf_brush in leaf.leaf_brushes() {
+            let leaf_brush = &self.leaf_brushes[leaf_brush as usize];
+
+            // Skip if we've already checked this brush
+            if checked_brushes.insert(leaf_brush.brush) {
+                let brush = &self.brushes[leaf_brush.brush as usize];
+
+                if (brush.contents & options.flags).is_empty() {
+                    continue;
+                }
+
+                self.clip_box_to_brush(state, trace, brush);
+
+                if trace.fraction == 0. {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn cast_ray_between_recursive(
+        &self,
+        node: Handle<'_, Self, Node>,
+        state: TraceInProgress,
+        checked_brushes: &mut HashSet<u16>,
+        trace: &mut Trace,
+        options: &TraceOptions,
+    ) {
+        if trace.fraction <= state.start_frac {
+            return;
+        }
+
+        let plane = node.plane().unwrap();
+
+        let (start_dot, end_dot, offset) = if plane.type_ < 3 {
+            (
+                state.start.0[plane.type_ as usize] - plane.dist,
+                state.end.0[plane.type_ as usize] - plane.dist,
+                state.extents.0[plane.type_ as usize],
+            )
+        } else {
+            (
+                state.start.dot(&plane.normal) - plane.dist,
+                state.end.dot(&plane.normal) - plane.dist,
+                state.extents.dot(&plane.normal).abs(),
+            )
+        };
+
+        let recurse = if start_dot >= offset && end_dot >= offset {
+            Some(node.children[0])
+        } else if start_dot < -offset && end_dot < -offset {
+            Some(node.children[1])
+        } else {
+            None
+        };
+
+        if let Some(child) = recurse {
+            if child < 0 {
+                return self.trace_leaf(
+                    self.leaf(-(child + 1) as usize).unwrap(),
+                    &state,
+                    checked_brushes,
+                    trace,
+                    options,
+                );
+            } else {
+                return self.cast_ray_between_recursive(
+                    self.node(child as usize).unwrap(),
+                    state,
+                    checked_brushes,
+                    trace,
+                    options,
+                );
+            }
+        }
+
+        let idist = (start_dot - end_dot).recip();
+
+        let (side, start_frac, end_frac) = if start_dot < end_dot {
+            (
+                1,
+                (start_dot - offset + DIST_EPSILON) * idist,
+                (start_dot + offset + DIST_EPSILON) * idist,
+            )
+        } else if start_dot > end_dot {
+            (
+                0,
+                (start_dot + offset + DIST_EPSILON) * idist,
+                (start_dot - offset - DIST_EPSILON) * idist,
+            )
+        } else {
+            (0, 1., 0.)
+        };
+
+        let start_frac = start_frac.clamp(0., 1.);
+        let end_frac = end_frac.clamp(0., 1.);
+
+        let midf = state.start_frac + (state.end_frac - state.start_frac) * start_frac;
+        let mid = state.start + start_frac * (state.end - state.start);
+
+        let child = node.children[side];
+        if child < 0 {
+            self.trace_leaf(
+                self.leaf(-(child + 1) as usize).unwrap(),
+                &state,
+                checked_brushes,
+                trace,
+                options,
+            );
+        } else {
+            self.cast_ray_between_recursive(
+                self.node(child as usize).unwrap(),
+                TraceInProgress {
+                    end_frac: midf,
+                    end: mid,
+                    ..state
+                },
+                checked_brushes,
+                trace,
+                options,
+            );
+        }
+
+        let midf = state.start_frac + (state.end_frac - state.start_frac) * end_frac;
+        let mid = state.start + end_frac * (state.end - state.start);
+
+        let child = node.children[1 - side];
+        if child < 0 {
+            self.trace_leaf(
+                self.leaf(-(child + 1) as usize).unwrap(),
+                &state,
+                checked_brushes,
+                trace,
+                options,
+            );
+        } else {
+            self.cast_ray_between_recursive(
+                self.node(child as usize).unwrap(),
+                TraceInProgress {
+                    start_frac: midf,
+                    start: mid,
+                    ..state
+                },
+                checked_brushes,
+                trace,
+                options,
+            );
+        }
+    }
+
+    pub fn cast_ray_between<C, S: Into<V3<C>>, E: Into<V3<C>>>(
+        &self,
+        root: Handle<'_, Self, Node>,
+        start: S,
+        end: E,
+        options: &TraceOptions,
+    ) -> Trace
+    where
+        C: CoordSystem,
+    {
+        let start = C::into_qvec(start.into());
+        let end = C::into_qvec(end.into());
+
+        let mut trace = Trace {
+            all_solid: false,
+            start_solid: false,
+            fraction: 1.,
+            start,
+            end,
+            contents: options.flags,
+            surface_flags: Default::default(),
+            plane: Default::default(),
+        };
+        let mut checked_brushes = Default::default();
+
+        let mins = [
+            start.0[0].min(end.0[0]),
+            start.0[1].min(end.0[1]),
+            start.0[2].min(end.0[2]),
+        ]
+        .into();
+
+        let maxs = [
+            start.0[0].max(end.0[0]),
+            start.0[1].max(end.0[1]),
+            start.0[2].max(end.0[2]),
+        ]
+        .into();
+
+        // let extents = maxs - mins;
+        let extents = Default::default();
+
+        self.cast_ray_between_recursive(
+            root,
+            TraceInProgress {
+                start_frac: 0.,
+                end_frac: 1.,
+                start,
+                end,
+                mins,
+                maxs,
+                extents,
+            },
+            &mut checked_brushes,
+            &mut trace,
+            options,
+        );
+
+        trace.end = start + trace.fraction * (end - start);
+
+        trace
+    }
+
+    pub fn cast_ray<C, P: Into<V3<C>>, N: Into<V3<C>>>(
+        &self,
+        root: Handle<'_, Self, Node>,
+        point: P,
+        norm: N,
+        options: &TraceOptions,
+    ) -> Trace
+    where
+        C: CoordSystem,
+    {
+        // HACK: AFAIK this is the maximum size of Quake maps anyway.
+        const VERY_BIG_VALUE: f32 = u16::MAX as f32;
+
+        let point = C::into_qvec(point.into());
+        let norm = C::into_qvec(norm.into());
+
+        let end = point + norm * VERY_BIG_VALUE;
+
+        self.cast_ray_between(root, point, end, options)
     }
 }
 

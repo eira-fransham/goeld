@@ -13,8 +13,6 @@ pub struct Atlas {
     alloc: Packer,
     texture: wgpu::Texture,
     padding: u32,
-    width: u32,
-    height: u32,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -22,7 +20,6 @@ pub struct AppendManyResult {
     pub first: Rect,
     pub all: Rect,
     pub stride_x: i32,
-    // stride_y: i32,
 }
 
 impl Default for AppendManyResult {
@@ -41,7 +38,6 @@ impl Default for AppendManyResult {
                 height: 0,
             },
             stride_x: 0,
-            // stride_y: 0,
         }
     }
 }
@@ -59,21 +55,11 @@ impl Atlas {
             unwritten: vec![],
             texture,
             padding,
-            width,
-            height,
         }
     }
 
     pub fn texture_view(&self) -> wgpu::TextureView {
         self.texture.create_view(&Default::default())
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
     }
 
     pub fn append_many<I, Img>(

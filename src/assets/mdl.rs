@@ -94,6 +94,7 @@ struct Animation {
 
 impl Animation {
     fn keyframe_at(&self, name: &str, time: f64) -> Option<cgmath::Matrix4<f32>> {
+        // TODO: Hardcoded duration here.
         let time = (time * self.fps) % 150.; // self.duration;
 
         let frames = self.keyframes_per_node.get(name)?;
@@ -152,8 +153,13 @@ impl Model {
         self.position_dirty = true;
     }
 
+    pub fn set_position(&mut self, pos: cgmath::Vector3<f32>) {
+        self.position = pos;
+        self.position_dirty = true;
+    }
+
     pub fn step(&mut self, dt: f64) {
-        if let Some(CurrentAnimation { timestamp, index }) = self.current_animation.as_mut() {
+        if let Some(CurrentAnimation { timestamp, .. }) = self.current_animation.as_mut() {
             *timestamp += dt;
         }
     }

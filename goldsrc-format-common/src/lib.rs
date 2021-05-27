@@ -1,6 +1,6 @@
 use arrayvec::{Array, ArrayString, ArrayVec};
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::{io, iter, num};
+use std::{cmp, fmt, io, iter, marker::PhantomData, num};
 
 #[cfg(not(debug_assertions))]
 fn error(msg: impl ToString) -> io::Error {
@@ -143,12 +143,9 @@ impl<C> ElementSize for V3<C> {
     const SIZE: usize = <[f32; 3]>::SIZE;
 }
 
-impl<C> SimpleParse for V3<C>
-where
-    C: Default,
-{
+impl<C> SimpleParse for V3<C> {
     fn parse<R: io::Read>(r: &mut R) -> io::Result<Self> {
-        <[f32; 3]>::parse(r).map(|f| V3(f, C::default()))
+        <[f32; 3]>::parse(r).map(|f| V3(f, PhantomData))
     }
 }
 
@@ -232,12 +229,9 @@ pub trait CoordSystem: Sized {
     fn from_qvec(vec: QVec) -> V3<Self>;
 }
 
-#[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Default, Copy, Clone)]
-pub struct XEastYSouthZUp;
-#[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Default, Copy, Clone)]
-pub struct XEastYNorthZUp;
-#[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Default, Copy, Clone)]
-pub struct XEastYDownZSouth;
+pub enum XEastYSouthZUp {}
+pub enum XEastYNorthZUp {}
+pub enum XEastYDownZSouth {}
 
 impl CoordSystem for XEastYSouthZUp {
     fn into_qvec(vec: V3<Self>) -> QVec {
@@ -267,11 +261,42 @@ impl CoordSystem for XEastYNorthZUp {
     }
 }
 
-#[derive(PartialEq, PartialOrd, Debug, Default, Clone, Copy)]
 // So that we can ensure that `size_of` correctly reports the size of this type.
 // `C` should be a ZST but if it isn't then this should still act correctly.
 #[repr(C)]
-pub struct V3<C>(pub [f32; 3], pub C);
+pub struct V3<C>(pub [f32; 3], pub PhantomData<C>);
+
+impl<C> cmp::PartialEq<Self> for V3<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl<C> cmp::PartialOrd<Self> for V3<C> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl<C> fmt::Debug for V3<C> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        #[derive(Debug)]
+        struct V3([f32; 3]);
+
+        V3(self.0).fmt(f)
+    }
+}
+impl<C> Default for V3<C> {
+    fn default() -> Self {
+        Self::ORIGIN
+    }
+}
+impl<C> Clone for V3<C> {
+    fn clone(&self) -> Self {
+        V3(self.0, self.1)
+    }
+}
+impl<C> Copy for V3<C> {}
 
 impl<C> std::ops::Neg for V3<C> {
     type Output = Self;
@@ -290,6 +315,21 @@ impl<C> std::ops::Add<Self> for V3<C> {
                 self.0[0] + other.0[0],
                 self.0[1] + other.0[1],
                 self.0[2] + other.0[2],
+            ],
+            self.1,
+        )
+    }
+}
+
+impl<C> std::ops::Sub<Self> for V3<C> {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        V3(
+            [
+                self.0[0] - other.0[0],
+                self.0[1] - other.0[1],
+                self.0[2] - other.0[2],
             ],
             self.1,
         )
@@ -318,15 +358,23 @@ impl<C> std::ops::Mul<f32> for V3<C> {
     }
 }
 
-impl<C> std::iter::Sum<Self> for V3<C>
-where
-    C: Default,
-{
+impl<C> std::ops::Mul<V3<C>> for f32 {
+    type Output = V3<C>;
+
+    fn mul(self, other: V3<C>) -> Self::Output {
+        V3(
+            [other.0[0] * self, other.0[1] * self, other.0[2] * self],
+            other.1,
+        )
+    }
+}
+
+impl<C> std::iter::Sum<Self> for V3<C> {
     fn sum<I>(mut iter: I) -> Self
     where
         I: Iterator<Item = Self>,
     {
-        let mut out = iter.next().unwrap_or(V3([0., 0., 0.], C::default()));
+        let mut out = iter.next().unwrap_or(V3([0., 0., 0.], PhantomData));
 
         for v in iter {
             out = out + v;
@@ -337,6 +385,8 @@ where
 }
 
 impl<C> V3<C> {
+    pub const ORIGIN: Self = Self([0.; 3], PhantomData);
+
     pub fn x(&self) -> f32 {
         self.0[0]
     }
@@ -346,11 +396,15 @@ impl<C> V3<C> {
     pub fn z(&self) -> f32 {
         self.0[2]
     }
+
+    pub fn abs(self) -> Self {
+        Self([self.x().abs(), self.y().abs(), self.z().abs()], self.1)
+    }
 }
 
-impl<C: Default> V3<C> {
+impl<C> V3<C> {
     pub fn new(xyz: [f32; 3]) -> Self {
-        V3(xyz, Default::default())
+        V3(xyz, PhantomData)
     }
 }
 
@@ -360,7 +414,7 @@ impl<C> V3<C> {
     }
 }
 
-impl<C: Default> From<[f32; 3]> for V3<C> {
+impl<C> From<[f32; 3]> for V3<C> {
     fn from(xyz: [f32; 3]) -> Self {
         V3::new(xyz)
     }

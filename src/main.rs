@@ -246,6 +246,7 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
 
     let mut frametimes = arraydeque::ArrayDeque::<[f64; 64], arraydeque::Wrapping>::new();
 
+    let mut i = 0usize;
     event_loop.run_async(async move |mut runner| 'main: loop {
         runner.wait().await;
 
@@ -414,6 +415,25 @@ async fn run(loader: Loader, bsp: Bsp, event_loop: EventLoop<()>, window: Window
                     imgui_platform.handle_event(imgui.io_mut(), &window, &event);
                 }
             }
+        }
+
+        let trace = bsp.bsp().cast_ray::<bsp::XEastYSouthZUp, _, _>(
+            bsp.bsp().root_node().unwrap(),
+            unsafe { std::mem::transmute::<_, [f32; 3]>(camera.position) },
+            unsafe {
+                std::mem::transmute::<_, [f32; 3]>(
+                    cgmath::Matrix3::from_angle_z(camera.yaw)
+                        * cgmath::Matrix3::from_angle_y(camera.pitch)
+                        * cgmath::Vector3::unit_x(),
+                )
+            },
+            &bsp::TraceOptions {
+                flags: bsp::ContentFlags::mask_playersolid(),
+            },
+        );
+
+        if trace.hit() {
+            model.set_position(<[f32; 3]>::from(trace.end).into());
         }
 
         let mut redraw_requests = events.redraw_requests().await;

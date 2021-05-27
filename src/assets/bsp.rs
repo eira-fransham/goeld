@@ -20,12 +20,18 @@ struct ClusterMeta {
 }
 
 pub struct World {
-    vis: bsp::Vis,
+    bsp: bsp::Bsp<bsp::Quake2>,
     tex_vert_offset: u64,
     world_vert_offset: u64,
     // Key is `(model, cluster)`
     cluster_meta: Vec<ClusterMeta>,
     model_ranges: Vec<Range<u32>>,
+}
+
+impl World {
+    pub fn bsp(&self) -> &bsp::Bsp<bsp::Quake2> {
+        &self.bsp
+    }
 }
 
 const EMISSIVE_THRESHOLD: u32 = 10;
@@ -40,11 +46,13 @@ fn cluster_meshes<'a, F>(
     Vec<TexturedVertex>,
     Vec<WorldVertex>,
     impl ExactSizeIterator<
-        Item = (
-            &'a bsp::Q2Model,
-            impl Iterator<Item = (&'a bsp::Q2Leaf, impl Iterator<Item = u32> + Clone + 'a)> + Clone + 'a,
-        ),
-    > + Clone
+            Item = (
+                &'a bsp::Q2Model,
+                impl Iterator<Item = (&'a bsp::Q2Leaf, impl Iterator<Item = u32> + Clone + 'a)>
+                    + Clone
+                    + 'a,
+            ),
+        > + Clone
         + 'a,
 )
 where
@@ -343,7 +351,7 @@ impl LoadAsset for BspAsset {
         };
 
         Ok(World {
-            vis: bsp.vis,
+            bsp,
             tex_vert_offset,
             world_vert_offset,
             cluster_meta,
@@ -422,7 +430,7 @@ impl<'a> Render for &'a mut World {
     ) -> RenderMesh<Self::Offsets, Self::Indices> {
         let pos: [f32; 3] = ctx.camera().position.into();
         let cluster_meta = &self.cluster_meta;
-        let vis = &self.vis;
+        let vis = &self.bsp.vis;
         let clipper = Frustum::<f32>::from_matrix4(ctx.camera().matrix()).unwrap();
 
         let cluster = vis
@@ -440,7 +448,7 @@ impl<'a> Render for &'a mut World {
             indices: WorldIndexIter {
                 clusters,
                 cluster_meta,
-                models: self.vis.models[model_start_index..].iter(),
+                models: self.bsp.vis.models[model_start_index..].iter(),
                 model_ranges: self.model_ranges[model_start_index..].iter(),
                 clipper,
             },

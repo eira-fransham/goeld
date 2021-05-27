@@ -53,6 +53,12 @@ impl Camera {
         Matrix4::from_translation(-self.position)
     }
 
+    pub fn view(&self) -> cgmath::Matrix3<f32> {
+        use cgmath::Matrix3;
+
+        Matrix3::from_angle_y(-self.pitch) * Matrix3::from_angle_z(-self.yaw)
+    }
+
     pub fn projection(&self) -> cgmath::Matrix4<f32> {
         use cgmath::Matrix4;
 
@@ -64,9 +70,7 @@ impl Camera {
             0.0, 0.0,  0.0, 1.0,
         );
 
-        let view = QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX
-            * Matrix4::from_angle_y(-self.pitch)
-            * Matrix4::from_angle_z(-self.yaw);
+        let view = QUAKE_TO_OPENGL_TRANSFORMATION_MATRIX * Matrix4::from(self.view());
         let projection = cgmath::perspective(self.vertical_fov, self.aspect_ratio, 1., 4096.);
         OPENGL_TO_WGPU_MATRIX * projection * view
     }
